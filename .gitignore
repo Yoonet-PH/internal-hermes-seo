@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Safety net — never commit secrets or local state, even if they ever land here.
+# (The scripts read the SE Ranking key from ../config.yaml at runtime; nothing
+#  secret lives in this directory today, and this keeps it that way.)
+.env
+.env.*
+*.db
+*.sqlite*
+*token*.json
+*secret*.json
+auth.json
+output/
