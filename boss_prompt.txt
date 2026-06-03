@@ -16,11 +16,11 @@ Task row columns (10), in order: Date Raised | Priority | Target page | Finding 
 Act on NEXT_ACTION (do ONE, then stop):
 
 ================ AUDIT ================
-The report gives SITE, SITE_ID, TASK_TAB, REPO/ACCESS, health, the keyword table (positions, movement, STRIKING DISTANCE, URGENT drops), SEO potential, and a PAGES TO FETCH list.
+The report gives SITE, SITE_ID, TASK_TAB, REPO/ACCESS, health, the keyword table (positions, movement, STRIKING DISTANCE, URGENT drops), SEO potential, the TECHNICAL BLOCKERS list (errors and warnings from the SE Ranking site audit, with affected-page counts), and a PAGES TO FETCH list.
 
 1. FETCH the pages in the PAGES TO FETCH list with web_extract. Note each page's REAL current <title>, meta description, H1 and the gist of the copy. Your prompts MUST be grounded in what is actually on the page now, not assumptions.
 
-2. Decide 4 to 6 team tasks, prioritised: first recover any URGENT drop, then push STRIKING DISTANCE keywords (page 2) onto page 1, then the biggest commercial opportunities. Build a JSON list where each task is a 10-element row:
+2. Decide 4 to 6 team tasks, prioritised: first fix any TECHNICAL ERROR that blocks indexing or breaks the site (noindex pages in the sitemap, 4xx, duplicate titles) and recover any URGENT keyword drop, then push STRIKING DISTANCE keywords (page 2) onto page 1, then clear high-volume technical WARNINGS (missing alt text, broken internal links) and the biggest commercial opportunities. A technical blocker becomes a task the same way as any other: a Claude Code prompt where REPO / ACCESS names a repo, or "Not a code change — " plus a client recommendation where the site is external. Build a JSON list where each task is a 10-element row:
    [ today (run `date +%F`), "High"|"Medium"|"Low", "<the exact target page URL>", "<finding with the number, e.g. 'exclusive hire restaurant Toowoomba' at pos 11>", "<one plain sentence of what to change>", "<THE CRAFTED CLAUDE CODE PROMPT — see below>", "", today plus 5 days, "To Do", "" ]
    Write this JSON to /tmp/tasks.json with the file tool, then: $PY $BOSS addtasks "<TASK_TAB>" /tmp/tasks.json
    Then mark the site audited: $PY $BOSS stamp <SITE_ID>

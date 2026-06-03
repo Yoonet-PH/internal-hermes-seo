@@ -208,6 +208,51 @@ def move_label(prev, now):
     return "no change"
 
 
+# --- technical audit blockers (SE Ranking site audit -> AUDIT brief) ---
+AUDIT_SEV = {"error": 0, "warning": 1, "notice": 2, "passed": 3}
+
+
+def _bare_domain(d):
+    d = (d or "").replace("https://", "").replace("http://", "").rstrip("/").lower()
+    return d[4:] if d.startswith("www.") else d
+
+
+def audit_blockers(domain):
+    """Best SE Ranking site audit for a domain -> errors+warnings with page counts.
+    Matches by domain (createAudit audits come back unlinked, site_id None).
+    Mirrors seo_tech.py's extraction so the boss audits on the same data the
+    daily Tech Health sweep shows on each tab."""
+    bd = _bare_domain(domain)
+    if not bd:
+        return None
+    res = serank("PROJECT_listAudits") or {}
+    items = res.get("items", res if isinstance(res, list) else [])
+    best = None
+    for a in items:
+        if isinstance(a, dict) and _bare_domain(a.get("url")) == bd:
+            rank = (1 if a.get("status") == "finished" else 0, int(a.get("id") or 0))
+            if best is None or rank > best[0]:
+                best = (rank, a)
+    if best is None:
+        return None
+    try:
+        rep = serank("PROJECT_getAuditReport", {"audit_id": int(best[1].get("id"))}) or {}
+    except Exception:
+        return {"score": "", "errors": "", "warnings": "", "blockers": []}
+    blockers = []
+    for sec in rep.get("sections", []) or []:
+        secname = sec.get("name", sec.get("uid", ""))
+        for code, prop in (sec.get("props", {}) or {}).items():
+            if isinstance(prop, dict):
+                st = (prop.get("status") or "").lower()
+                val = prop.get("value") or 0
+                if st in ("error", "warning") and isinstance(val, (int, float)) and val > 0:
+                    blockers.append((st, prop.get("name", code), int(val), secname))
+    blockers.sort(key=lambda b: (AUDIT_SEV.get(b[0], 9), -b[2]))
+    return {"score": rep.get("score_percent", ""), "errors": rep.get("total_errors", 0),
+            "warnings": rep.get("total_warnings", 0), "blockers": blockers}
+
+
 # --- per-site task state ---
 def site_task_state(tab):
     rows = read_tab(tab)
@@ -368,6 +413,17 @@ def main():
             print("\nSEO_POTENTIAL:", json.dumps(pot)[:500])
         except Exception:
             pass
+        tech = audit_blockers(s["domain"])
+        if tech and tech.get("blockers"):
+            print(f"\nTECHNICAL BLOCKERS (SE Ranking site audit — score {tech['score']}/100, "
+                  f"{tech['errors']} errors / {tech['warnings']} warnings) — FIX THESE TOO:")
+            for sev, name, val, secname in tech["blockers"][:12]:
+                print(f"  - [{sev.upper()}] {name} — {val} page(s)  ({secname})")
+            print("Each blocker is a candidate task: where REPO / ACCESS names a repo, write a "
+                  "ready-to-run Claude Code prompt to fix it there; where it says 'No repo / SEO "
+                  "only', write 'Not a code change — ' + a client recommendation. Errors before warnings.")
+        elif tech is not None:
+            print(f"\nTECHNICAL: site audit score {tech.get('score', '')}/100 — no blocking errors or warnings.")
         pages, seen = [], set()
         for k in ki:
             lp = k["landing"]
