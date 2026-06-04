@@ -70,13 +70,20 @@ Telegram token, model creds, the SE Ranking key and Google OAuth.
    git clone https://github.com/bens-playpen/hermes-seo-boss.git ~/.hermes/scripts
    ```
 
-5. **Path fix (only if the new Mac's username ≠ `home`).** The export prints any
-   absolute `/Users/...` paths it carried (currently just one, in `auth.json`).
-   If your new username differs:
+5. **Path fix (only if the new Mac's username ≠ `home`).** The export's
+   "Portability check" prints the exact files carrying an absolute `/Users/home`
+   path (05/06/2026 it was 3: `auth.json` — the load-bearing one — plus two skill
+   reference docs). Rewrite each file the export named:
    ```bash
    OLD=/Users/home; NEW=$HOME
    sed -i '' "s#$OLD#$NEW#g" ~/.hermes/auth.json ~/.hermes/config.yaml ~/.hermes/cron/jobs.json
+   # plus any skill docs the export listed, e.g.:
+   sed -i '' "s#$OLD#$NEW#g" \
+     ~/.hermes/skills/creative/touchdesigner-mcp/references/mcp-tools.md \
+     ~/.hermes/skills/autonomous-ai-agents/hermes-agent/SKILL.md
    ```
+   Only `auth.json` is load-bearing; the skill docs are reference text, so a missed
+   one is cosmetic.
 
 ---
 
