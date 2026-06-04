@@ -5,7 +5,8 @@ run inside Hermes (`~/.hermes/scripts`) on a cron and do the un-glamorous,
 repeatable work — sync, state, intelligence, technical health — so the LLM agent
 only has to supply judgement and writing.
 
-**Source of truth:** SE Ranking (via its MCP endpoint).
+**Source of truth:** SE Ranking (via its MCP endpoint) — *migrating off tracking
+slots; see `SE_RANKING_OFFRAMP.md` and `seo_intel.py`.*
 **Management board:** one Google Sheet (the "Hermes SEO" sheet). Each monitored
 site has a tab; the `Monitored Sites` tab is the registry/index.
 
@@ -19,6 +20,9 @@ site has a tab; the `Monitored Sites` tab is the registry/index.
 | `boss_prompt.txt` | The agent prompt the boss cron delivers. |
 | `backfill.sh` | One-time: loop a fresh boss tick per never-audited site until none are due. |
 | `seo_boss_v1_backup.py` | Snapshot of the v1 boss before the v2 intelligence/verify rewrite. |
+| `seo_intel.py` | **Slot-free** keyword intelligence. `keyword_intel_v2(domain)` is a drop-in for `seo_boss.keyword_intel(site_id)` that sources positions from DataForSEO live SERP (universal, pay-per-call) and GSC (free where we have access), keeping history in the Sheet. Removes the need for an SE Ranking tracking project per site. Not yet wired into the cron — see the off-ramp doc. | — |
+| `seed_tracked_keywords.py` | One-off (run 05/06/2026): built the `Tracked Keywords` tab from the live SE Ranking lists with each site's real location/device. | — |
+| `SE_RANKING_OFFRAMP.md` | The plan + parity proof + cost model + cutover steps for retiring SE Ranking tracking slots. **Start here.** | — |
 
 ## How a site flows through it
 
