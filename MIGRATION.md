@@ -85,6 +85,17 @@ Telegram token, model creds, the SE Ranking key and Google OAuth.
    Only `auth.json` is load-bearing; the skill docs are reference text, so a missed
    one is cosmetic.
 
+6. **Restore the config-backup key.** The weekly config-backup cron (`f459e13a5dc2`)
+   travels in `jobs.json`, but its key is deliberately kept out of every bundle — so
+   recreate it from your password manager, or the job errors each week:
+   ```bash
+   printf '%s' '<key from password manager>' > ~/.hermes/.config-backup-key
+   chmod 600 ~/.hermes/.config-backup-key
+   ```
+   Use the **same** key as this Mac so both machines' iCloud snapshots stay
+   decryptable with one key. (Skip only if you want a fresh backup lineage — then
+   mint a new key and save it.)
+
 ---
 
 ## C. Cutover — make the new Mac live
