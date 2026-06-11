@@ -231,11 +231,11 @@ def audit_blockers(domain):
 def site_task_state(tab):
     rows = read_tab(tab)
     recs, _ = rows_as_dicts(rows)
-    open_count, overdue, done_unver, completed_recent = 0, [], [], []
+    open_tasks, overdue, done_unver, completed_recent = [], [], [], []
     for d in recs:
         status = d.get("Status", "").strip().lower()
         if status in OPEN_STATUSES:
-            open_count += 1
+            open_tasks.append(d)
             due = d.get("Due", "").strip()
             if due and due < tstr():
                 overdue.append(d)
@@ -245,7 +245,7 @@ def site_task_state(tab):
             dr = d.get("Date Raised", "").strip()
             if dr and dr >= days_ago(CLIENT_UPDATE_CADENCE_DAYS):
                 completed_recent.append(d)
-    return open_count, overdue, done_unver, completed_recent
+    return open_tasks, overdue, done_unver, completed_recent
 
 
 def verify_result(task, kintel):
@@ -337,7 +337,7 @@ def build_sites():
         if deltas:
             md = round(sum(deltas) / len(deltas))
             move = f"{'+' if md > 0 else ''}{md}"
-        open_count, overdue, done_unver, completed = site_task_state(title)
+        open_tasks, overdue, done_unver, completed = site_task_state(title)
         sites.append({
             "sid": str(pv.get("SE Ranking ID") or "").strip() or bd,
             "title": title, "domain": domain,
@@ -347,7 +347,8 @@ def build_sites():
             "last_audited": pv.get("Last Audited", ""),
             "last_email": pv.get("Last Client Update", ""),
             "repo": pv.get("Repo / Access", ""),
-            "open": open_count, "overdue": overdue,
+            "open": len(open_tasks), "open_tasks": open_tasks,
+            "overdue": overdue,
             "done_unver": done_unver, "completed": completed,
         })
     return sites
@@ -473,6 +474,13 @@ def main():
         print(f"REPO / ACCESS: {s.get('repo') or 'not recorded — write the Claude Code prompt to be run in the site repo, and detect the platform from the live page if you can'}")
         print(f"HEALTH: top10 {s['top10']}, avg pos {s['avg']}, "
               f"7d move {s['move'] or 'n/a'}. Last audited {s['last_audited'] or 'never'}.")
+        if s["open_tasks"]:
+            print(f"\nALREADY OPEN ({len(s['open_tasks'])} task(s) on the board) — do NOT raise a "
+                  "task that duplicates any of these; only add genuinely new findings:")
+            for t in s["open_tasks"][:15]:
+                print(f"  - ROW {t['_row']} [{t.get('Status', '').strip() or 'To Do'}] "
+                      f"{(t.get('Target page', '') or '-')[:60]} | "
+                      f"{(t.get('Recommended action', '') or '')[:100]}")
         striking = [k for k in ki if k["striking"]]
         drops = [k for k in ki if k["pos_prev"] < 900 and k["change"] <= -10]
         print("\nKEYWORDS (tracked — position now, 35d movement, landing page):")
