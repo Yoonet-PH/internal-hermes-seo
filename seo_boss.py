@@ -16,6 +16,12 @@ v2 adds, over v1:
 
 Actions, in priority order: AUDIT (weekly per site) > VERIFY (team-done tasks) >
 EMAIL (monthly, only with something to report) > CHASE (overdue) > NONE.
+
+v3 (the SE Ranking off-ramp, per SE_RANKING_OFFRAMP.md): rank tracking no longer
+uses SE Ranking projects/slots. Sites come from the Monitored Sites registry,
+headline stats from the Position History tab, and live positions for the one
+action site from seo_intel.keyword_intel_v2 (GSC where wired, else DataForSEO).
+SE Ranking remains only as the technical site-audit crawler (audit_blockers).
 """
 import json
 import sys
@@ -131,6 +137,7 @@ def safe_tab_name(title):
 
 
 def domain_of(p):
+    """Domain of an SE Ranking project dict (kept for seed_tracked_keywords.py)."""
     return (p.get("name") or "").strip().replace("https://", "").replace("http://", "").rstrip("/")
 
 
@@ -147,48 +154,12 @@ def rows_as_dicts(rows):
     return out, idx
 
 
-# --- keyword intelligence ---
-def keyword_intel(site_id):
-    """Return [{kw, pos_now, pos_prev, change, landing, striking, raised_pos_fn}]
-    using listKeywords (text) joined to getKeywordStats (positions over 35 days)."""
-    names = {}
-    try:
-        for kw in (serank("PROJECT_listKeywords", {"site_id": site_id}) or []):
-            names[str(kw.get("id"))] = {"name": kw.get("name", ""), "link": kw.get("link")}
-    except Exception:
-        pass
-    out = []
-    try:
-        stats = serank("PROJECT_getKeywordStats", {
-            "site_id": site_id, "date_from": days_ago(35), "date_to": tstr(),
-            "with_landing_pages": "1"}) or []
-    except Exception:
-        stats = []
-    for engine in stats if isinstance(stats, list) else []:
-        for kw in engine.get("keywords", []):
-            kid = str(kw.get("id"))
-            series = [(p.get("date"), p.get("pos", 0)) for p in kw.get("positions", [])]
-            series = [(d, (p if p else 999)) for d, p in series if d]
-            series.sort()
-            pos_now = series[-1][1] if series else 999
-            pos_prev = series[0][1] if len(series) > 1 else pos_now
-            landing = ""
-            lp = kw.get("landing_pages") or kw.get("landing_page")
-            if isinstance(lp, list) and lp:
-                landing = lp[-1].get("url", "") if isinstance(lp[-1], dict) else str(lp[-1])
-            elif isinstance(lp, str):
-                landing = lp
-            out.append({
-                "id": kid, "kw": names.get(kid, {}).get("name", ""),
-                "pos_now": pos_now, "pos_prev": pos_prev,
-                "change": pos_prev - pos_now,  # +ve = improved (moved up)
-                "landing": landing or (names.get(kid, {}).get("link") or ""),
-                "striking": 11 <= pos_now <= 20,
-                "series": series,
-            })
-    out = [k for k in out if k["kw"]]
-    out.sort(key=lambda k: (k["pos_now"] if k["pos_now"] else 999))
-    return out
+# --- keyword intelligence (slot-free: GSC / DataForSEO via seo_intel) ---
+def keyword_intel(site):
+    """Live positions for one site dict — the off-ramp drop-in. Records a
+    Position History row per keyword so movement and the verify loop accumulate."""
+    import seo_intel
+    return seo_intel.keyword_intel_v2(site["domain"], record=True)
 
 
 def fmt_pos(p):
@@ -197,7 +168,7 @@ def fmt_pos(p):
 
 def move_label(prev, now):
     if now >= 999:
-        return "dropped out of top 100"
+        return "not in top 100" if prev >= 999 else "dropped out of top 100"
     if prev >= 999:
         return f"new entry at {now}"
     diff = prev - now
@@ -299,34 +270,77 @@ def verify_result(task, kintel):
 
 
 # --- main report ---
-def build_sites():
-    projects = [p for p in (serank("PROJECT_listProjects") or []) if p.get("is_active", 1)]
-    prev, _ = rows_as_dicts(read_tab(REGISTRY_TAB))
-    prevmap = {str(d.get("SE Ranking ID")): d for d in prev}
-    ensure_tab(REGISTRY_TAB, REGISTRY_HEADER)
-    sites = []
-    for p in projects:
-        sid = p["id"]
-        raw = (p.get("title") or "").strip()
-        if not raw or "://" in raw or raw.lower().startswith("http"):
-            raw = domain_of(p) or str(sid)
-        title = safe_tab_name(raw)
-        ensure_tab(title, TASK_HEADER)
+def _history_by_domain(days=35):
+    """{bare_domain: {kw_lower: sorted [(date, pos)]}} from the Position History
+    tab, capped to `days`. One Sheet read serves every site's headline stats."""
+    import seo_intel
+    rows = read_tab(seo_intel.HISTORY_TAB, "A1:F100000")
+    recs, _ = rows_as_dicts(rows)
+    cutoff = days_ago(days)
+    by = {}
+    for d in recs:
+        dom = _bare_domain(d.get("Domain"))
+        kw = (d.get("Keyword") or "").strip().lower()
+        date = (d.get("Date") or "").strip()
+        if not (dom and kw and date) or date < cutoff:
+            continue
         try:
-            s = serank("PROJECT_getSummary", {"site_id": sid}) or {}
-        except Exception:
-            s = {}
-        open_count, overdue, done_unver, completed = site_task_state(title)
-        pv = prevmap.get(str(sid), {})
+            pos = int(float(d.get("Position") or 999))
+        except ValueError:
+            continue
+        by.setdefault(dom, {}).setdefault(kw, []).append((date, pos))
+    for dom in by.values():
+        for series in dom.values():
+            series.sort()
+    return by
+
+
+def build_sites():
+    """Sites come from the Monitored Sites registry (a spreadsheet row, not an
+    SE Ranking slot). Headline stats are reconstructed from Position History —
+    no live position calls here; those happen only for the action site."""
+    import seo_intel
+    ensure_tab(REGISTRY_TAB, REGISTRY_HEADER)
+    prev, _ = rows_as_dicts(read_tab(REGISTRY_TAB))
+    tracked, _ = rows_as_dicts(read_tab(seo_intel.TRACKED_TAB))
+    hist = _history_by_domain()
+    sites = []
+    seen_domains = set()
+    for pv in prev:
+        domain = (pv.get("Domain") or "").strip()
+        title = safe_tab_name((pv.get("Site") or "").strip() or domain)
+        if not domain or _bare_domain(domain) in seen_domains:
+            continue
+        seen_domains.add(_bare_domain(domain))
+        ensure_tab(title, TASK_HEADER)
+        bd = _bare_domain(domain)
+        kws = [(t.get("Keyword") or "").strip().lower()
+               for t in tracked if _bare_domain(t.get("Domain")) == bd]
+        kws = [k for k in kws if k]
+        series_map = hist.get(bd, {})
+        now_pos, week_pos = [], []
+        for k in kws:
+            series = series_map.get(k) or []
+            if not series:
+                continue
+            now_pos.append(series[-1][1])
+            week = [p for dt, p in series if dt <= days_ago(7)]
+            week_pos.append(week[-1] if week else series[0][1])
+        ranked = [p for p in now_pos if p < 999]
+        top10 = sum(1 for p in now_pos if p <= 10)
+        avg = round(sum(ranked) / len(ranked)) if ranked else ""
         move = ""
-        if s.get("today_avg") is not None and s.get("yesterday_avg") is not None:
-            delta = s["yesterday_avg"] - s["today_avg"]
-            move = f"{'+' if delta > 0 else ''}{delta}"
+        deltas = [w - n for n, w in zip(now_pos, week_pos) if n < 999 or w < 999]
+        if deltas:
+            md = round(sum(deltas) / len(deltas))
+            move = f"{'+' if md > 0 else ''}{md}"
+        open_count, overdue, done_unver, completed = site_task_state(title)
         sites.append({
-            "sid": sid, "title": title, "domain": domain_of(p),
-            "keywords": p.get("keyword_count", ""),
-            "vis": s.get("visibility_percent", ""), "top10": s.get("top10", ""),
-            "avg": s.get("today_avg", ""), "move": move,
+            "sid": str(pv.get("SE Ranking ID") or "").strip() or bd,
+            "title": title, "domain": domain,
+            "keywords": len(kws),
+            "vis": "", "top10": top10 if now_pos else "",
+            "avg": avg, "move": move,
             "last_audited": pv.get("Last Audited", ""),
             "last_email": pv.get("Last Client Update", ""),
             "repo": pv.get("Repo / Access", ""),
@@ -348,6 +362,8 @@ def write_registry(sites):
         s["vis"], s["top10"], s["avg"], s["move"], s["last_audited"],
         s["last_email"], s["open"], nxt(s["last_audited"]),
     ] for s in sites])
+    SHEETS.values().clear(spreadsheetId=SHEET_ID,
+                          range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:M1000").execute()
 
 
 def audit_due(s):
@@ -374,11 +390,11 @@ def main():
     sites = build_sites()
     write_registry(sites)
     print(f"# SEO Boss situation report — {tstr()}")
-    print(f"Monitored sites: {len(sites)} (synced from SE Ranking).\n")
-    print("| Site | Domain | Vis% | Top10 | AvgPos | Move | Last Audited | Open |")
-    print("|---|---|---|---|---|---|---|---|")
+    print(f"Monitored sites: {len(sites)} (from the Monitored Sites registry).\n")
+    print("| Site | Domain | Top10 | AvgPos | 7d Move | Last Audited | Open |")
+    print("|---|---|---|---|---|---|---|")
     for s in sites:
-        print(f"| {s['title']} | {s['domain']} | {s['vis']} | {s['top10']} | {s['avg']} "
+        print(f"| {s['title']} | {s['domain']} | {s['top10']} | {s['avg']} "
               f"| {s['move']} | {s['last_audited'] or 'never'} | {s['open']} |")
     print()
 
@@ -389,12 +405,12 @@ def main():
 
     if due:
         s = due[0]
-        ki = keyword_intel(s["sid"])
+        ki = keyword_intel(s)
         print("NEXT_ACTION: AUDIT")
         print(f"SITE: {s['title']} | DOMAIN: {s['domain']} | SITE_ID: {s['sid']} | TASK_TAB: {s['title']}")
         print(f"REPO / ACCESS: {s.get('repo') or 'not recorded — write the Claude Code prompt to be run in the site repo, and detect the platform from the live page if you can'}")
-        print(f"HEALTH: visibility {s['vis']}%, top10 {s['top10']}, avg pos {s['avg']}, "
-              f"7d move {s['move']}. Last audited {s['last_audited'] or 'never'}.")
+        print(f"HEALTH: top10 {s['top10']}, avg pos {s['avg']}, "
+              f"7d move {s['move'] or 'n/a'}. Last audited {s['last_audited'] or 'never'}.")
         striking = [k for k in ki if k["striking"]]
         drops = [k for k in ki if k["pos_prev"] < 900 and k["change"] <= -10]
         print("\nKEYWORDS (tracked — position now, 35d movement, landing page):")
@@ -408,11 +424,6 @@ def main():
         if striking:
             print(f"\nPRIORITISE the {len(striking)} striking-distance keywords above — "
                   "small on-page work moves these to page 1 fastest.")
-        try:
-            pot = serank("PROJECT_getSeoPotential", {"site_id": s["sid"]})
-            print("\nSEO_POTENTIAL:", json.dumps(pot)[:500])
-        except Exception:
-            pass
         tech = audit_blockers(s["domain"])
         if tech and tech.get("blockers"):
             print(f"\nTECHNICAL BLOCKERS (SE Ranking site audit — score {tech['score']}/100, "
@@ -438,10 +449,10 @@ def main():
             print(f"  - {pg}")
     elif verify:
         s = verify[0]
-        ki = keyword_intel(s["sid"])
+        ki = keyword_intel(s)
         print("NEXT_ACTION: VERIFY")
         print(f"SITE: {s['title']} | TASK_TAB: {s['title']}")
-        print("Tasks the team marked Done — with the REAL before/after computed from SE Ranking:")
+        print("Tasks the team marked Done — with the REAL before/after computed from position history:")
         for t in s["done_unver"]:
             vr = verify_result(t, ki)
             if vr:
@@ -454,11 +465,11 @@ def main():
                       f"re-check at next audit")
     elif emails:
         s = emails[0]
-        ki = keyword_intel(s["sid"])
+        ki = keyword_intel(s)
         wins = [k for k in ki if k["change"] > 0][:6]
         print("NEXT_ACTION: EMAIL")
         print(f"SITE: {s['title']} | DOMAIN: {s['domain']}")
-        print(f"HEALTH: visibility {s['vis']}%, {s['top10']} keywords in top 10, avg pos {s['avg']}.")
+        print(f"HEALTH: {s['top10']} keywords in top 10, avg pos {s['avg']}.")
         print("\nWORK COMPLETED THIS PERIOD (team):")
         for t in s["completed"]:
             print(f"  - {t.get('Recommended action','')[:100]}")
@@ -478,15 +489,19 @@ def main():
 
 
 def stamp(field, site_id):
-    """Stamp a registry date field (Last Audited / Last Client Update) = today."""
+    """Stamp a registry date field (Last Audited / Last Client Update) = today.
+    Matches by SE Ranking ID, domain, or site/tab name — new sites have no ID."""
     rows = read_tab(REGISTRY_TAB)
     recs, idx = rows_as_dicts(rows)
     col = idx.get(field)
     if col is None:
         print(f"unknown field {field}")
         return
+    key = str(site_id).strip()
     for d in recs:
-        if str(d.get("SE Ranking ID")) == str(site_id):
+        if (str(d.get("SE Ranking ID", "")).strip() == key
+                or _bare_domain(d.get("Domain")) == _bare_domain(key)
+                or (d.get("Site", "") or "").strip().lower() == key.lower()):
             a1 = chr(ord("A") + col)
             update_range(f"'{REGISTRY_TAB}'!{a1}{d['_row']}", [[tstr()]])
             print(f"stamped {field}={tstr()} for {site_id}")

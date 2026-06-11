@@ -10,7 +10,8 @@ source of truth and SE Ranking tracking projects can be retired.
     python seed_tracked_keywords.py --dry-run  # print, write nothing
 """
 import sys
-sys.path.insert(0, "/Users/home/.hermes/scripts")
+from pathlib import Path
+sys.path.insert(0, str(Path.home() / ".hermes/scripts"))
 import seo_boss as s
 import seo_intel as si
 
