@@ -14,8 +14,11 @@ v2 adds, over v1:
     report, the script gathers the month's wins and the agent drafts the email.
   - A weekly digest (`seo_boss_next.py digest`) for owner oversight.
 
-Actions, in priority order: AUDIT (weekly per site) > VERIFY (team-done tasks) >
-EMAIL (monthly, only with something to report) > CHASE (overdue) > NONE.
+Actions: VERIFY and CHASE are fully deterministic and handled inline every tick
+(no LLM): done tasks get their real before/after written from position history,
+overdue tasks get stamped and noted. The agent is only invoked for the work that
+needs judgement — AUDIT (weekly per site) > EMAIL (monthly, only with something
+to report) > NONE.
 
 v3 (the SE Ranking off-ramp, per SE_RANKING_OFFRAMP.md): rank tracking no longer
 uses SE Ranking projects/slots. Sites come from the Monitored Sites registry,
@@ -366,6 +369,53 @@ def write_registry(sites):
                           range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:M1000").execute()
 
 
+def do_verifications(sites):
+    """Deterministic VERIFY: write the real before/after for every team-Done
+    task. The agent used to rephrase these numbers; a template does it free."""
+    done = []
+    for s in sites:
+        if not s["done_unver"]:
+            continue
+        ki = keyword_intel(s)
+        for t in s["done_unver"]:
+            vr = verify_result(t, ki)
+            if vr:
+                if vr["delta"] > 0:
+                    result = (f"Worked: '{vr['kw']}' moved {fmt_pos(vr['then'])} "
+                              f"to {fmt_pos(vr['now'])} over 35 days")
+                elif vr["delta"] < 0:
+                    result = (f"Gone backwards: '{vr['kw']}' was {fmt_pos(vr['then'])}, "
+                              f"now {fmt_pos(vr['now'])}. Review at next audit")
+                else:
+                    result = (f"No movement yet: '{vr['kw']}' still at "
+                              f"{fmt_pos(vr['now'])}, keep pushing")
+            else:
+                result = ("Verified at face value, no single tracked keyword to "
+                          "measure. Check again at next audit")
+            update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
+                         [["Verified", result]])
+            done.append(f"'{s['title']}' row {t['_row']}: {result}")
+    return done
+
+
+def do_chases(sites):
+    """Deterministic CHASE: stamp overdue tasks with a firm note. Skips rows
+    already stamped so the tick stays idempotent."""
+    done = []
+    for s in sites:
+        for t in s["overdue"]:
+            if (t.get("Status", "").strip().lower() == "overdue"
+                    and t.get("Result", "").strip()):
+                continue
+            note = (f"Overdue since {t.get('Due', '')}. Owner "
+                    f"{t.get('Owner', '').strip() or 'UNASSIGNED'}: action this "
+                    "today or escalate")
+            update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
+                         [["Overdue", note]])
+            done.append(f"'{s['title']}' row {t['_row']} (due {t.get('Due', '')})")
+    return done
+
+
 def audit_due(s):
     if not s["last_audited"]:
         return True
@@ -398,10 +448,22 @@ def main():
               f"| {s['move']} | {s['last_audited'] or 'never'} | {s['open']} |")
     print()
 
+    # deterministic housekeeping — every tick, no LLM
+    verified = do_verifications(sites)
+    chased = do_chases(sites)
+    if verified:
+        print(f"HOUSEKEEPING — verified {len(verified)} done task(s) from position history:")
+        for line in verified:
+            print(f"  - {line}")
+        print()
+    if chased:
+        print(f"HOUSEKEEPING — stamped {len(chased)} overdue task(s):")
+        for line in chased:
+            print(f"  - {line}")
+        print()
+
     due = sorted([s for s in sites if audit_due(s)], key=lambda s: (s["last_audited"] or "0000"))
-    verify = [s for s in sites if s["done_unver"]]
     emails = [s for s in sites if email_due(s)]
-    chase = [s for s in sites if s["overdue"]]
 
     if due:
         s = due[0]
@@ -447,22 +509,6 @@ def main():
         print(f"  - {home}")
         for pg in pages[:4]:
             print(f"  - {pg}")
-    elif verify:
-        s = verify[0]
-        ki = keyword_intel(s)
-        print("NEXT_ACTION: VERIFY")
-        print(f"SITE: {s['title']} | TASK_TAB: {s['title']}")
-        print("Tasks the team marked Done — with the REAL before/after computed from position history:")
-        for t in s["done_unver"]:
-            vr = verify_result(t, ki)
-            if vr:
-                print(f"- ROW {t['_row']}: \"{t['Recommended action'][:80]}\" | "
-                      f"keyword '{vr['kw']}' was {fmt_pos(vr['then'])}, now {fmt_pos(vr['now'])} "
-                      f"({move_label(vr['then'], vr['now'])})")
-            else:
-                print(f"- ROW {t['_row']}: \"{t['Recommended action'][:80]}\" | "
-                      f"no single tracked keyword to measure — confirm at face value, "
-                      f"re-check at next audit")
     elif emails:
         s = emails[0]
         ki = keyword_intel(s)
@@ -477,15 +523,10 @@ def main():
         for k in wins:
             print(f"  - \"{k['kw']}\": now pos {fmt_pos(k['pos_now'])} (up {k['change']})")
         print("\nDraft a warm, plain client update email to the Client Emails tab.")
-    elif chase:
-        print("NEXT_ACTION: CHASE")
-        for s in chase:
-            for t in s["overdue"]:
-                print(f"- TAB '{s['title']}' ROW {t['_row']}: \"{t['Recommended action'][:80]}\" "
-                      f"(due {t['Due']}, owner {t.get('Owner') or 'UNASSIGNED'})")
     else:
         print("NEXT_ACTION: NONE")
-        print("All sites within audit cadence, nothing to verify, no client update due, no overdue tasks.")
+        print("All sites within audit cadence, no client update due. "
+              "Verifications and overdue stamps are handled above, deterministically.")
 
 
 def stamp(field, site_id):

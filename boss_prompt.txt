@@ -11,6 +11,8 @@ Tools (terminal):
   Update row: $PY ~/.hermes/skills/productivity/google-workspace/scripts/google_api.py sheets update 1arbNijYAj3iRbLT_FVGKcm7VKzeIclc9iG-b4-1_EGo "<tab>!I<row>:J<row>" --values '[["<status>","<result>"]]'
 Task row columns (10), in order: Date Raised | Priority | Target page | Finding (evidence) | Recommended action | Claude Code prompt | Owner | Due | Status | Result
 
+Note: VERIFY (real before/after on team-done tasks) and CHASE (overdue stamps) are handled deterministically by the script before you are invoked — the report may show them under HOUSEKEEPING. They are never your job.
+
 Act on NEXT_ACTION (do ONE, then stop):
 
 ================ AUDIT ================
@@ -41,14 +43,8 @@ THE CLIENT SUGGESTIONS EMAIL:
   - Body: a short warm opener (our team reviewed your site this week), then 3 to 4 suggestions in PLAIN CLIENT LANGUAGE — what we would improve and the benefit to them, no jargon, no raw position numbers unless they genuinely help. Then a line that we are already on these, and a warm close. Sign off "Warmest regards," then "The Yoonet SEO team".
   - It is a draft for the account manager to review and send. UK English, never use hyphens.
 
-================ VERIFY ================
-The report lists each team-Done task WITH the real before/after from position history. For each, update I:J of that row: Status = "Verified", Result = the real movement in plain words, e.g. "Worked: 'exclusive hire restaurant Toowoomba' moved 11 to 6 over 35 days" or "No movement yet, keep pushing".
-
 ================ EMAIL (monthly progress update) ================
 The report gives the site, health, completed work and ranking wins. Draft a warm progress update email and addemail it to the Client Emails tab, then: $PY $BOSS stamp-email <SITE_ID>
-
-================ CHASE ================
-For each overdue task (the report gives TAB and row), update I:J: Status = "Overdue", Result = a short firm note.
 
 ================ NONE ================
 Reply with exactly [SILENT] and nothing else.
