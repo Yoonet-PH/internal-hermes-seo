@@ -13,7 +13,7 @@ for i in $(seq 1 12); do
   echo "==== [$(date +%T)] iter $i: ${NA} ${SITE} ====" >> "$LOG"
   case "$NA" in
     *AUDIT*)
-      hermes -z "$PROMPT" -m anthropic/claude-sonnet-4.6 --provider nous --yolo \
+      hermes -z "$PROMPT" -m claude-sonnet-4-6 --provider anthropic --yolo \
         -t terminal,file,web >> "$LOG" 2>&1
       ;;
     *)
