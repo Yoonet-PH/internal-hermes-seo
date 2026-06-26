@@ -86,7 +86,7 @@ def serank(tool, args=None):
     req = urllib.request.Request(MCP_URL, data=body, method="POST", headers={
         "X-Api-Key": _KEY, "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream"})
-    with urllib.request.urlopen(req, timeout=50) as r:
+    with urllib.request.urlopen(req, timeout=15) as r:
         raw = r.read().decode()
     for line in raw.splitlines():
         line = line[5:].strip() if line.startswith("data:") else line.strip()
@@ -105,15 +105,29 @@ def serank(tool, args=None):
 
 
 # --- sheet helpers ---
-def tab_titles():
-    meta = SHEETS.get(spreadsheetId=SHEET_ID).execute()
-    return [s["properties"]["title"] for s in meta.get("sheets", [])]
+_TAB_TITLES_CACHE = None
+
+
+def tab_titles(force=False):
+    """Tab titles for the workbook, cached for the life of the process. Every
+    read_tab()/ensure_tab() used to re-fetch the full spreadsheet metadata,
+    which on an 11-site board meant 50+ Sheets reads per build_sites() and blew
+    Google's 60-reads/min/user quota (HTTP 429). The set of tabs only changes
+    when WE add one, so we fetch once and keep the cache in sync on ensure_tab.
+    Pass force=True to invalidate (not normally needed)."""
+    global _TAB_TITLES_CACHE
+    if force or _TAB_TITLES_CACHE is None:
+        meta = SHEETS.get(spreadsheetId=SHEET_ID).execute()
+        _TAB_TITLES_CACHE = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    return _TAB_TITLES_CACHE
 
 
 def ensure_tab(title, header):
     if title not in tab_titles():
         SHEETS.batchUpdate(spreadsheetId=SHEET_ID, body={
             "requests": [{"addSheet": {"properties": {"title": title}}}]}).execute()
+        if _TAB_TITLES_CACHE is not None:   # keep cache in sync, no re-fetch
+            _TAB_TITLES_CACHE.append(title)
     SHEETS.values().update(spreadsheetId=SHEET_ID, range=f"'{title}'!A1",
                            valueInputOption="RAW", body={"values": [header]}).execute()
 
