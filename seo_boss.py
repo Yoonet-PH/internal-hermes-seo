@@ -55,7 +55,8 @@ sys.path.insert(0, str(HERMES_HOME / "skills/productivity/google-workspace/scrip
 from googleapiclient.discovery import build  # noqa: E402
 import google_api as gapi  # noqa: E402
 
-SHEETS = build("sheets", "v4", credentials=gapi.get_credentials()).spreadsheets()
+SHEETS = build("sheets", "v4", credentials=gapi.sa_credentials(
+    ["https://www.googleapis.com/auth/spreadsheets"])).spreadsheets()
 
 
 def today():

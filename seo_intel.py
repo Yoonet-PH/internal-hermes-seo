@@ -118,7 +118,8 @@ def gsc_positions(gsc_property, days=30):
     try:
         from googleapiclient.discovery import build
         import google_api as gapi
-        svc = build("searchconsole", "v1", credentials=gapi.get_credentials())
+        svc = build("searchconsole", "v1", credentials=gapi.sa_credentials(
+            ["https://www.googleapis.com/auth/webmasters.readonly"]))
     except Exception:
         return {}
     end = s.today()
