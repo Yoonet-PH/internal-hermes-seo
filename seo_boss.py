@@ -452,6 +452,66 @@ def email_due(s):
         return True
 
 
+def _elem_phrase(element):
+    """Distinctive phrase for dedupe: H2 heading text, else the element's first word."""
+    e = (element or "").strip()
+    if e.lower().startswith("h2") and ":" in e:
+        return e.split(":", 1)[1].strip().lower()
+    return e.split()[0].lower() if e else ""
+
+
+def hybrid_audit():
+    """Deterministic AUDIT via the hybrid generator: local Gemma writes the on-page
+    rewrite tasks, Claude (Opus 4.8) drafts the client email. Picks the same audit-due
+    site main() would, writes to the Sheet, and stamps Last Audited. No LLM agent."""
+    import seo_hybrid
+    sites = build_sites()
+    due = sorted([s for s in sites if audit_due(s)], key=lambda s: (s["last_audited"] or "0000"))
+    if not due:
+        print("NEXT_ACTION: NONE (hybrid) — no site due for audit.")
+        return 0
+    s = due[0]
+    print(f"NEXT_ACTION: AUDIT (hybrid) — SITE: {s['title']} | DOMAIN: {s['domain']}")
+    try:
+        out = seo_hybrid.run(s["domain"])           # Gemma tasks + Claude email, grounded
+    except Exception as e:
+        print(f"HYBRID FAILED: generation error for {s['domain']}: {str(e)[:200]}")
+        return 1
+
+    # dedupe generated tasks against what's already open on the board
+    open_blob = " ".join(
+        ((t.get("Recommended action", "") or "") + " " + (t.get("Target page", "") or "")).lower()
+        for t in s["open_tasks"])
+    target = out["facts"]["url"]
+    due_date = (today() + datetime.timedelta(days=5)).isoformat()
+    rows, skipped = [], 0
+    for t in out["tasks"]:
+        phrase = _elem_phrase(t.get("element", ""))
+        if phrase and phrase in open_blob:
+            skipped += 1
+            continue
+        rows.append([tstr(), t.get("priority", "Medium"), target,
+                     t.get("finding", ""), t.get("action", ""),
+                     t.get("claude_code_prompt", ""), "", due_date, "To Do", ""])
+    if rows:
+        ensure_tab(s["title"], TASK_HEADER)
+        append_rows(s["title"], rows)
+    print(f"  wrote {len(rows)} task(s) to '{s['title']}'"
+          + (f" (skipped {skipped} already-open)" if skipped else ""))
+
+    email = out.get("email", {})
+    if email.get("by") in (None, "none", "error") or not email.get("body"):
+        print(f"  client email NOT written — {email.get('note', 'no email produced')}")
+    else:
+        ensure_tab(EMAILS_TAB, EMAIL_HEADER)
+        append_rows(EMAILS_TAB, [[tstr(), s["title"], email.get("subject", ""),
+                                  email.get("body", ""), "Draft"]])
+        print(f"  wrote client email draft (by {email['by']}) to '{EMAILS_TAB}'")
+
+    stamp("Last Audited", s.get("sid") or s["title"])
+    return 0
+
+
 def main():
     sites = build_sites()
     write_registry(sites)
@@ -599,6 +659,8 @@ if __name__ == "__main__":
         stamp("Last Client Update", sys.argv[2])
     elif len(sys.argv) >= 2 and sys.argv[1] == "digest":
         digest()
+    elif len(sys.argv) >= 2 and sys.argv[1] == "hybrid":
+        sys.exit(hybrid_audit())
     elif len(sys.argv) >= 4 and sys.argv[1] == "addtasks":
         # addtasks "<tab>" <jsonfile>  — jsonfile = list of 10-col rows
         rows = json.load(open(sys.argv[3]))
