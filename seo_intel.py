@@ -230,28 +230,44 @@ def keyword_intel_v2(domain, keywords=None, location=None, language=DEFAULT_LANG
             gsc_cache[prop] = gsc_positions(prop)
         return gsc_cache[prop]
 
-    out, hist_rows, total_cost = [], [], 0.0
-    for kw in uniq:
+    # Resolve each keyword: GSC first (already batched into one call per
+    # property), else a live DataForSEO SERP lookup. The DataForSEO endpoint is
+    # synchronous (~13s/keyword as it crawls Google live), so doing these
+    # sequentially is the dominant cost of a tick. They are independent and
+    # purely I/O-bound, so we fan them out across a thread pool: wall time drops
+    # from sum(calls) to ~max(call). GSC keywords resolve inline (no network).
+    from concurrent.futures import ThreadPoolExecutor
+
+    def resolve(kw):
+        """-> (kw, pos_now, landing, source, cost). Never raises."""
         cfg = rowcfg.get(kw.lower(), {
             "location": location or DEFAULT_LOCATION, "language": language,
             "device": device, "gsc": gsc_property or ""})
-        pos_now, landing, source = NOT_FOUND, "", ""
         gmap = gsc_for(cfg["gsc"])
         if kw.lower() in gmap:
             raw, landing = gmap[kw.lower()]
-            pos_now = int(round(raw))
-            source = "gsc"
-        else:
-            try:
-                pos_now, landing, cost = dfs_rank(
-                    domain, kw, cfg["location"], cfg["language"], cfg["device"])
-                total_cost += float(cost or 0)
-                source = "dataforseo"
-            except Exception as e:
-                source = f"error:{str(e)[:30]}"
+            return kw, int(round(raw)), landing, "gsc", 0.0
+        try:
+            pos_now, landing, cost = dfs_rank(
+                domain, kw, cfg["location"], cfg["language"], cfg["device"])
+            return kw, pos_now, landing, "dataforseo", float(cost or 0)
+        except Exception as e:
+            return kw, NOT_FOUND, "", f"error:{str(e)[:30]}", 0.0
+
+    # Pre-warm the GSC cache once (single-threaded) so concurrent workers don't
+    # race to issue duplicate Search Console pulls for the same property.
+    for kw in uniq:
+        gsc_for(rowcfg.get(kw.lower(), {}).get("gsc", gsc_property or ""))
+
+    max_workers = min(10, len(uniq)) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        resolved = list(pool.map(resolve, uniq))   # preserves input order
+
+    out, hist_rows, total_cost = [], [], 0.0
+    for kw, pos_now, landing, source, cost in resolved:
+        total_cost += cost
         if verbose:
             print(f"  {kw!r:42} pos {pos_now:<4} via {source}")
-
         series = read_history(domain, kw)
         series_with_now = series + [(s.tstr(), pos_now)]
         pos_prev = series[0][1] if series else pos_now

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # config-backup.sh — weekly encrypted snapshot of this Hermes install's unique
-# state to an offsite location (iCloud Drive by default).
+# state to an offsite location (a folder in ai@'s Google Drive).
 #
 # Closes the gap that bens-playpen/hermes-seo-boss backs up only the *scripts* —
 # the creds, config.yaml, profiles/personas, skills, memories and history have no
@@ -24,8 +24,11 @@ set -euo pipefail
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 SCRIPTS="$HERMES_HOME/scripts"
+PY="$HERMES_HOME/hermes-agent/venv/bin/python"
 KEYFILE="${HERMES_BACKUP_KEY:-$HERMES_HOME/.config-backup-key}"
-TARGET="${HERMES_BACKUP_DIR:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/Hermes-Backups}"
+# Offsite destination is a folder in ai@'s Google Drive, uploaded via the Hermes
+# service account (drive_backup.py). Override the folder id with HERMES_BACKUP_DRIVE_FOLDER.
+DRIVE_FOLDER="${HERMES_BACKUP_DRIVE_FOLDER:-1eS8nOimWk7k76E112_tgxwzFdkKwpsLL}"
 KEEP="${HERMES_BACKUP_KEEP:-8}"
 LOG="$HERMES_HOME/logs/config-backup.log"
 
@@ -52,20 +55,13 @@ openssl enc -aes-256-cbc -pbkdf2 -salt -pass file:"$KEYFILE" -in "$PLAIN" -out "
   || fail "openssl encryption failed"
 rm -f "$PLAIN"
 
-# 3. land it offsite
-mkdir -p "$TARGET"
-DEST="$TARGET/hermes-config-$STAMP.tgz.enc"
-cp -p "$ENC" "$DEST"
-chmod 600 "$DEST"
+# 3. land it offsite — upload to ai@'s Google Drive (and prune to last $KEEP there)
+SIZE="$(du -h "$ENC" | cut -f1)"
+SHA="$(shasum -a 256 "$ENC" | cut -c1-12)"
+"$PY" "$SCRIPTS/drive_backup.py" "$ENC" "$DRIVE_FOLDER" "$KEEP" >>"$LOG" 2>&1 \
+  || fail "Drive upload failed (see $LOG)"
 
-# 4. prune to the last $KEEP snapshots
-ls -t "$TARGET"/hermes-config-*.tgz.enc 2>/dev/null | tail -n +"$((KEEP+1))" | while read -r old; do
-  rm -f "$old" && echo "[$(ts)] pruned $(basename "$old")" >>"$LOG"
-done
-
-SIZE="$(du -h "$DEST" | cut -f1)"
-SHA="$(shasum -a 256 "$DEST" | cut -c1-12)"
-echo "[$(ts)] config backup ok: $(basename "$DEST") ($SIZE, sha $SHA)" >>"$LOG"
+echo "[$(ts)] config backup ok: hermes-config-$STAMP.tgz.enc ($SIZE, sha $SHA) -> ai@ Drive/Hermes-Backups" >>"$LOG"
 
 # concise stdout (delivered by the --no-agent cron; one line/week)
-echo "Hermes config backed up: $(basename "$DEST") ($SIZE) → ${TARGET/#$HOME/~}  [kept last $KEEP]"
+echo "Hermes config backed up to ai@ Drive (Hermes-Backups): hermes-config-$STAMP.tgz.enc ($SIZE)  [kept last $KEEP]"
