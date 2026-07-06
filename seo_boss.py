@@ -41,10 +41,14 @@ AUDIT_CADENCE_DAYS = 7
 CLIENT_UPDATE_CADENCE_DAYS = 30
 MCP_URL = "https://api.seranking.com/mcp"
 
-REGISTRY_HEADER = ["Site", "Domain", "Repo / Access", "SE Ranking ID", "Keywords",
-                   "Visibility %", "In Top 10", "Avg Pos", "Movement",
-                   "Last Audited", "Last Client Update", "Open Tasks", "Next Review",
-                   "Date Added"]
+REGISTRY_HEADER = ["Site", "Domain", "Type", "Brand", "Status", "Repo / Access",
+                   "SE Ranking ID", "Keywords", "Visibility %", "In Top 10", "Avg Pos",
+                   "Movement", "Last Audited", "Last Client Update", "Open Tasks",
+                   "Next Review", "Date Added", "Notes"]
+# Human-maintained Status values that take a site out of the audit/email rota
+# (kept in the registry, but the Boss does no LLM work on them).
+SKIP_AUDIT_STATUSES = {"pre-launch", "prelaunch", "parked", "setup needed",
+                       "setup-needed", "paused", "inactive", "archived"}
 TASK_HEADER = ["Date Raised", "Priority", "Target page", "Finding (evidence)",
                "Recommended action", "Claude Code prompt (paste into Claude Code)",
                "Owner", "Due", "Status", "Result"]
@@ -363,6 +367,8 @@ def build_sites():
             "last_audited": pv.get("Last Audited", ""),
             "last_email": pv.get("Last Client Update", ""),
             "repo": pv.get("Repo / Access", ""),
+            "type": pv.get("Type", ""), "brand": pv.get("Brand", ""),
+            "status": pv.get("Status", ""), "notes": pv.get("Notes", ""),
             "added": (pv.get("Date Added") or "").strip() or tstr(),
             "open": len(open_tasks), "open_tasks": open_tasks,
             "overdue": overdue,
@@ -379,12 +385,14 @@ def write_registry(sites):
         except Exception:
             return tstr()
     update_range(f"'{REGISTRY_TAB}'!A1", [REGISTRY_HEADER] + [[
-        s["title"], s["domain"], s.get("repo", ""), s["sid"], s["keywords"],
+        s["title"], s["domain"], s.get("type", ""), s.get("brand", ""),
+        s.get("status", ""), s.get("repo", ""), s["sid"], s["keywords"],
         s["vis"], s["top10"], s["avg"], s["move"], s["last_audited"],
         s["last_email"], s["open"], nxt(s["last_audited"]), s.get("added", ""),
+        s.get("notes", ""),
     ] for s in sites])
     SHEETS.values().clear(spreadsheetId=SHEET_ID,
-                          range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:N1000").execute()
+                          range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:R1000").execute()
 
 
 def do_verifications(sites):
@@ -435,6 +443,8 @@ def do_chases(sites):
 
 
 def audit_due(s):
+    if (s.get("status", "") or "").strip().lower() in SKIP_AUDIT_STATUSES:
+        return False
     if not s["last_audited"]:
         return True
     try:
@@ -444,6 +454,8 @@ def audit_due(s):
 
 
 def email_due(s):
+    if (s.get("status", "") or "").strip().lower() in SKIP_AUDIT_STATUSES:
+        return False
     if not s["completed"]:
         return False  # nothing to report yet
     if not s["last_email"]:
