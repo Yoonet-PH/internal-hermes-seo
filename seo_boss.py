@@ -43,7 +43,8 @@ MCP_URL = "https://api.seranking.com/mcp"
 
 REGISTRY_HEADER = ["Site", "Domain", "Repo / Access", "SE Ranking ID", "Keywords",
                    "Visibility %", "In Top 10", "Avg Pos", "Movement",
-                   "Last Audited", "Last Client Update", "Open Tasks", "Next Review"]
+                   "Last Audited", "Last Client Update", "Open Tasks", "Next Review",
+                   "Date Added"]
 TASK_HEADER = ["Date Raised", "Priority", "Target page", "Finding (evidence)",
                "Recommended action", "Claude Code prompt (paste into Claude Code)",
                "Owner", "Due", "Status", "Result"]
@@ -362,6 +363,7 @@ def build_sites():
             "last_audited": pv.get("Last Audited", ""),
             "last_email": pv.get("Last Client Update", ""),
             "repo": pv.get("Repo / Access", ""),
+            "added": (pv.get("Date Added") or "").strip() or tstr(),
             "open": len(open_tasks), "open_tasks": open_tasks,
             "overdue": overdue,
             "done_unver": done_unver, "completed": completed,
@@ -379,10 +381,10 @@ def write_registry(sites):
     update_range(f"'{REGISTRY_TAB}'!A1", [REGISTRY_HEADER] + [[
         s["title"], s["domain"], s.get("repo", ""), s["sid"], s["keywords"],
         s["vis"], s["top10"], s["avg"], s["move"], s["last_audited"],
-        s["last_email"], s["open"], nxt(s["last_audited"]),
+        s["last_email"], s["open"], nxt(s["last_audited"]), s.get("added", ""),
     ] for s in sites])
     SHEETS.values().clear(spreadsheetId=SHEET_ID,
-                          range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:M1000").execute()
+                          range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:N1000").execute()
 
 
 def do_verifications(sites):
