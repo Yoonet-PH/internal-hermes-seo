@@ -58,7 +58,32 @@ DONE_STATUSES = {"done", "complete", "completed"}
 
 sys.path.insert(0, str(HERMES_HOME / "skills/productivity/google-workspace/scripts"))
 from googleapiclient.discovery import build  # noqa: E402
+from googleapiclient.errors import HttpError  # noqa: E402
 import google_api as gapi  # noqa: E402
+import time as _time
+import random as _random
+
+
+def _execute(req, tries=6):
+    """Run a Google API request with exponential backoff on transient errors.
+
+    Sheets enforces 60 reads and 60 writes per minute per user; a burst mid-audit
+    returns HTTP 429 and, without this, the write is simply lost and the site's
+    audit half-written. Retries 429/500/503 with jitter; re-raises anything else
+    (and the final attempt) so genuine failures still surface."""
+    for i in range(tries):
+        try:
+            return req.execute()
+        except HttpError as e:
+            status = getattr(getattr(e, "resp", None), "status", None)
+            try:
+                status = int(status)
+            except (TypeError, ValueError):
+                status = None
+            if status in (429, 500, 503) and i < tries - 1:
+                _time.sleep(min(2 ** i, 30) + _random.uniform(0, 0.75))
+                continue
+            raise
 
 SHEETS = build("sheets", "v4", credentials=gapi.sa_credentials(
     ["https://www.googleapis.com/auth/spreadsheets"])).spreadsheets()
@@ -122,37 +147,37 @@ def tab_titles(force=False):
     Pass force=True to invalidate (not normally needed)."""
     global _TAB_TITLES_CACHE
     if force or _TAB_TITLES_CACHE is None:
-        meta = SHEETS.get(spreadsheetId=SHEET_ID).execute()
+        meta = _execute(SHEETS.get(spreadsheetId=SHEET_ID))
         _TAB_TITLES_CACHE = [s["properties"]["title"] for s in meta.get("sheets", [])]
     return _TAB_TITLES_CACHE
 
 
 def ensure_tab(title, header):
     if title not in tab_titles():
-        SHEETS.batchUpdate(spreadsheetId=SHEET_ID, body={
-            "requests": [{"addSheet": {"properties": {"title": title}}}]}).execute()
+        _execute(SHEETS.batchUpdate(spreadsheetId=SHEET_ID, body={
+            "requests": [{"addSheet": {"properties": {"title": title}}}]}))
         if _TAB_TITLES_CACHE is not None:   # keep cache in sync, no re-fetch
             _TAB_TITLES_CACHE.append(title)
-    SHEETS.values().update(spreadsheetId=SHEET_ID, range=f"'{title}'!A1",
-                           valueInputOption="RAW", body={"values": [header]}).execute()
+    _execute(SHEETS.values().update(spreadsheetId=SHEET_ID, range=f"'{title}'!A1",
+                                    valueInputOption="RAW", body={"values": [header]}))
 
 
 def read_tab(title, rng="A1:Z1000"):
     if title not in tab_titles():
         return []
-    return SHEETS.values().get(
-        spreadsheetId=SHEET_ID, range=f"'{title}'!{rng}").execute().get("values", [])
+    return _execute(SHEETS.values().get(
+        spreadsheetId=SHEET_ID, range=f"'{title}'!{rng}")).get("values", [])
 
 
 def update_range(rng, values):
-    SHEETS.values().update(spreadsheetId=SHEET_ID, range=rng,
-                           valueInputOption="RAW", body={"values": values}).execute()
+    _execute(SHEETS.values().update(spreadsheetId=SHEET_ID, range=rng,
+                                    valueInputOption="RAW", body={"values": values}))
 
 
 def append_rows(tab, rows):
-    SHEETS.values().append(
+    _execute(SHEETS.values().append(
         spreadsheetId=SHEET_ID, range=f"'{tab}'!A1", valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS", body={"values": rows}).execute()
+        insertDataOption="INSERT_ROWS", body={"values": rows}))
 
 
 def safe_tab_name(title):
@@ -391,8 +416,8 @@ def write_registry(sites):
         s["last_email"], s["open"], nxt(s["last_audited"]), s.get("added", ""),
         s.get("notes", ""),
     ] for s in sites])
-    SHEETS.values().clear(spreadsheetId=SHEET_ID,
-                          range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:R1000").execute()
+    _execute(SHEETS.values().clear(spreadsheetId=SHEET_ID,
+                                   range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:R1000"))
 
 
 def do_verifications(sites):
@@ -647,8 +672,47 @@ def stamp(field, site_id):
     print(f"site_id {site_id} not found")
 
 
+def digest_narrative(sites, tot_overdue, tot_done):
+    """One-shot Claude summary of the week for Ben and Honey. Returns prose, or ''
+    if no API key / the call fails — the caller writes the table regardless, so the
+    digest never depends on the LLM being up (this is what the old agent job got
+    wrong: it flailed and produced nothing)."""
+    try:
+        import seo_hybrid
+        key = seo_hybrid.anthropic_key()
+        if not key:
+            return ""
+        movers = sorted(sites, key=lambda s: -(int(s["top10"]) if str(s["top10"]).isdigit() else 0))
+        lines = "\n".join(
+            f"- {s['title']}: avg pos {s['avg']}, {s['top10']} in top 10, 7d move {s['move']}, "
+            f"{s['open']} open tasks, {len(s['overdue'])} overdue, {len(s['completed'])} done in 30d"
+            for s in movers)
+        prompt = (
+            "You are the SEO Boss writing this week's oversight note for Ben and Honey (Yoonet). "
+            "UK English, plain and direct, no jargon, no bolded headings, no bullet points. "
+            f"Portfolio: {len(sites)} monitored sites, {tot_overdue} overdue tasks, "
+            f"{tot_done} tasks completed in the last 30 days.\n\nPer site:\n{lines}\n\n"
+            "Write 4 to 6 sentences: what moved, where the risk is (overdue/stalled), and the one "
+            "thing worth attention next week. Return the prose only, nothing else."
+        )
+        body = json.dumps({
+            "model": seo_hybrid.CLAUDE_MODEL, "max_tokens": 1024,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode()
+        req = urllib.request.Request(seo_hybrid.CLAUDE_URL, data=body, method="POST", headers={
+            "x-api-key": key, "anthropic-version": seo_hybrid.CLAUDE_VERSION,
+            "content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            d = json.load(r)
+        return next((b["text"] for b in d.get("content", []) if b.get("type") == "text"), "").strip()
+    except Exception as e:
+        print(f"  narrative skipped: {str(e)[:160]}")
+        return ""
+
+
 def digest():
-    """Write a deterministic weekly digest for owner oversight."""
+    """Write a deterministic weekly digest for owner oversight, with an optional
+    Claude narrative. Fully self-contained — no LLM agent, so it cannot flail."""
     sites = build_sites()
     ensure_tab(DIGEST_TAB, ["Generated", "Site", "Avg Pos", "Top10",
                             "7d Move", "Open Tasks", "Overdue", "Done (30d)"])
@@ -662,6 +726,13 @@ def digest():
                    "Open Tasks", "Overdue", "Done (30d)"]] + rows)
     tot_overdue = sum(len(s["overdue"]) for s in sites)
     tot_done = sum(len(s["completed"]) for s in sites)
+
+    narrative = digest_narrative(sites, tot_overdue, tot_done)
+    if narrative:
+        # Stable side panel in column J so it never collides with the table.
+        update_range(f"'{DIGEST_TAB}'!J1", [["Weekly Summary"], [narrative]])
+        print("  narrative written to J1:J2")
+
     print(f"Digest written: {len(sites)} sites, {tot_overdue} overdue tasks, "
           f"{tot_done} completed in last 30 days.")
 
