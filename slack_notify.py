@@ -53,21 +53,36 @@ POST_URL = "https://slack.com/api/chat.postMessage"
 # --------------------------------------------------------------------------- #
 # credentials
 # --------------------------------------------------------------------------- #
+TOKEN_VARS = ("SEO_SLACK_BOT_TOKEN", "SLACK_BOT_TOKEN")
+
+
 def token():
     """Bot token (xoxb-) from the environment, falling back to ~/.hermes/.env.
 
-    Unlike seo_intel._dfs_auth(), a COMMENTED line does not count: .env ships with
-    a commented SLACK_BOT_TOKEN placeholder, and picking that up would mean every
-    post failing against a dead token instead of cleanly no-opping."""
-    tok = os.environ.get("SLACK_BOT_TOKEN")
-    if not tok:
-        try:
-            env = (HERMES_HOME / ".env").read_text()
-            m = re.search(r"^\s*SLACK_BOT_TOKEN=(.+)$", env, re.M)
-            tok = m.group(1).strip().strip('"').strip("'") if m else None
-        except Exception:
-            tok = None
-    return tok or None
+    SEO_SLACK_BOT_TOKEN is preferred and is what the Boss should be given. The
+    gateway watches SLACK_BOT_TOKEN and, seeing it, will try to bring up the
+    interactive Slack adapter on every restart — which needs SLACK_APP_TOKEN for
+    Socket Mode, fails without it, and would quietly go live workspace-wide the
+    day somebody added one. Under its own name the push layer is inert to the
+    gateway: it can speak, and it cannot listen. SLACK_BOT_TOKEN is still read as
+    a fallback for the day we deliberately run both.
+
+    A COMMENTED line does not count (.env ships a commented placeholder); picking
+    that up would mean posting against a dead token instead of cleanly no-opping.
+    """
+    for var in TOKEN_VARS:
+        tok = os.environ.get(var)
+        if tok:
+            return tok
+    try:
+        env = (HERMES_HOME / ".env").read_text()
+    except Exception:
+        return None
+    for var in TOKEN_VARS:
+        m = re.search(rf"^\s*{var}=(.+)$", env, re.M)
+        if m:
+            return m.group(1).strip().strip('"').strip("'") or None
+    return None
 
 
 def enabled():
