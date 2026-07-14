@@ -175,31 +175,52 @@ def _prio(t):
     return (t.get("Priority") or "").strip().upper() or "MEDIUM"
 
 
+DETAIL_LINE = ("_Evidence, the affected page and a ready-to-run Claude Code prompt "
+               "for each are on the tracker._")
+
+
+def _summary(t):
+    """A short headline for a task — "Shorten the homepage title tag", not the
+    full three-clause instruction.
+
+    Slack is a notice board, not the brief. The bullet says what the job IS so a
+    developer can tell at a glance whether it is theirs; the tracker row carries
+    the how. Keeping the two separate stops the channel turning into a wall of
+    text that nobody reads — which is the failure mode we are trying to fix, not
+    reproduce in a new place."""
+    s = " ".join((t.get("Recommended action") or "").split())
+    # First clause only. Take the EARLIEST break in the string, not the first
+    # separator that happens to match — otherwise a full stop late in the
+    # sentence wins over an " and " early in it and nothing gets cut.
+    cuts = [i for i in (s.find(sep) for sep in (". ", "; ", ", ", " and ", " so ",
+                                                " that ", " with ", " across "))
+            if i > 0]
+    if cuts:
+        s = s[:min(cuts)]
+    return _clip(s, 55) or "See the tracker"
+
+
+def _bullet(t, show_owner=False):
+    owner = (t.get("Owner") or "").strip()
+    who = f", {owner}" if (show_owner and owner) else (", *unassigned*" if show_owner else "")
+    return (f"\n• *{_prio(t)}* · {_summary(t)}"
+            f"  _(row {t.get('_row')}, due {_dm(t.get('Due'))}{who})_")
+
+
 def new_tasks_msg(site, tasks):
     n = len(tasks)
-    head = (f":mag: *{site}* — {n} new SEO task{'s' if n != 1 else ''} raised\n")
-    lines = []
-    for t in tasks:
-        owner = (t.get("Owner") or "").strip() or "unassigned"
-        lines.append(
-            f"\n*{_prio(t)}* · {_clip(t.get('Recommended action'), 110)}\n"
-            f"    Page: {_clip(t.get('Target page'), 80) or '—'}\n"
-            f"    Why: {_clip(t.get('Finding (evidence)'), 130)}\n"
-            f"    Due {_dm(t.get('Due'))} · {owner} · sheet row {t.get('_row')}"
-        )
-    return head + "".join(lines) + f"\n\n<{SHEET_URL}|Open the tracker>"
+    head = f":mag: *{site}* — {n} new SEO task{'s' if n != 1 else ''} raised\n"
+    lines = [_bullet(t) for t in tasks]
+    return (head + "".join(lines) + f"\n\n{DETAIL_LINE}"
+            f"\n<{SHEET_URL}|Open the tracker>")
 
 
 def overdue_msg(site, tasks):
     n = len(tasks)
     head = f":rotating_light: *{site}* — {n} task{'s' if n != 1 else ''} now overdue\n"
-    lines = [
-        f"\n• *{_prio(t)}* · {_clip(t.get('Recommended action'), 110)}\n"
-        f"    Due {_dm(t.get('Due'))} · "
-        f"{(t.get('Owner') or '').strip() or '*unassigned*'} · sheet row {t.get('_row')}"
-        for t in tasks
-    ]
-    return head + "".join(lines) + f"\n\n<{SHEET_URL}|Open the tracker>"
+    lines = [_bullet(t, show_owner=True) for t in tasks]
+    return (head + "".join(lines) + f"\n\n{DETAIL_LINE}"
+            f"\n<{SHEET_URL}|Open the tracker>")
 
 
 def verified_msg(site, results):
@@ -219,13 +240,10 @@ def backlog_msg(site, open_tasks, overdue):
             + (f", {o} of them overdue" if o else "") + ".*\n")
     top = sorted(open_tasks,
                  key=lambda t: (0 if _prio(t) == "HIGH" else 1, t.get("_row") or 0))[:5]
-    lines = [
-        f"\n• *{_prio(t)}* · {_clip(t.get('Recommended action'), 110)}"
-        f"  _(due {_dm(t.get('Due'))}, row {t.get('_row')})_"
-        for t in top
-    ]
-    more = f"\n\n…and {n - len(top)} more on the tracker." if n > len(top) else ""
-    return head + "".join(lines) + more + f"\n\n<{SHEET_URL}|Open the tracker>"
+    lines = [_bullet(t) for t in top]
+    more = f"\n• …and {n - len(top)} more" if n > len(top) else ""
+    return (head + "".join(lines) + more + f"\n\n{DETAIL_LINE}"
+            f"\n<{SHEET_URL}|Open the tracker>")
 
 
 # --------------------------------------------------------------------------- #
