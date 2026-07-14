@@ -28,6 +28,7 @@ SE Ranking remains only as the technical site-audit crawler (audit_blockers).
 """
 import json
 import os
+import re
 import sys
 import datetime
 import urllib.request
@@ -534,6 +535,27 @@ def do_chases(sites):
     return done
 
 
+def blocker_covered_by(blocker_name, open_tasks):
+    """Row number of an open task that already covers this SE Ranking blocker, else None.
+
+    The agent kept re-raising the same technical blocker every week — the duplicate-title
+    error on Balanga was raised on 08/07 and again on 14/07 — because it had to infer the
+    overlap from a truncated action string that never mentioned the blocker. Deciding this
+    in Python and telling it outright is far more reliable than asking it to notice."""
+    words = {w for w in re.findall(r"[a-z]{4,}", (blocker_name or "").lower())
+             if w not in {"page", "pages", "http", "with", "have", "that", "this",
+                          "code", "codes", "status", "tags", "tag"}}
+    if not words:
+        return None
+    for t in open_tasks:
+        hay = ((t.get("Finding (evidence)") or "") + " "
+               + (t.get("Recommended action") or "")).lower()
+        hits = sum(1 for w in words if w in hay)
+        if hits and hits >= max(1, len(words) - 1):   # nearly all key words present
+            return t.get("_row")
+    return None
+
+
 def audit_due(s):
     if (s.get("status", "") or "").strip().lower() in SKIP_AUDIT_STATUSES:
         return False
@@ -673,9 +695,15 @@ def main():
             print(f"\nALREADY OPEN ({len(s['open_tasks'])} task(s) on the board) — do NOT raise a "
                   "task that duplicates any of these; only add genuinely new findings:")
             for t in s["open_tasks"][:15]:
+                # The FINDING must be shown, not just the action. Row 2 on Balanga read
+                # "Rewrite the /business-directory page title…" (an action that sounds
+                # like one page) while its finding was "62 pages share the same title"
+                # — so the agent could not see it already covered the duplicate-title
+                # blocker, and raised it again. Showing only the action hid the overlap.
                 print(f"  - ROW {t['_row']} [{t.get('Status', '').strip() or 'To Do'}] "
-                      f"{(t.get('Target page', '') or '-')[:60]} | "
-                      f"{(t.get('Recommended action', '') or '')[:100]}")
+                      f"{(t.get('Target page', '') or '-')[:60]}")
+                print(f"      FINDING: {(t.get('Finding (evidence)', '') or '')[:150]}")
+                print(f"      ACTION:  {(t.get('Recommended action', '') or '')[:110]}")
         striking = [k for k in ki if k["striking"]]
         drops = [k for k in ki if k["pos_prev"] < 900 and k["change"] <= -10]
         print("\nKEYWORDS (tracked — position now, 35d movement, landing page):")
@@ -694,7 +722,19 @@ def main():
             print(f"\nTECHNICAL BLOCKERS (SE Ranking site audit — score {tech['score']}/100, "
                   f"{tech['errors']} errors / {tech['warnings']} warnings) — FIX THESE TOO:")
             for sev, name, val, secname in tech["blockers"][:12]:
-                print(f"  - [{sev.upper()}] {name} — {val} page(s)  ({secname})")
+                # Say outright which blockers an open row already covers, rather than
+                # hoping the agent spots it. The same blocker was re-raised week after
+                # week because the agent had to infer the overlap for itself.
+                # Flag the overlap, but do not forbid outright — the matcher is keyword
+                # based and cannot tell "fix the homepage meta description" (1 page) from
+                # "build a CMS template for the other 913". Blocking the second would kill
+                # a real fix. So: force the agent to justify a second bite, or drop it.
+                covered = blocker_covered_by(name, s["open_tasks"])
+                flag = (f"\n      <-- ROW {covered} ALREADY COVERS THIS BLOCKER. Do not raise it "
+                        f"again unless your task covers a genuinely DIFFERENT scope (different "
+                        f"pages). If it does, your finding MUST say how it differs from ROW "
+                        f"{covered}. If it does not, raise nothing." if covered else "")
+                print(f"  - [{sev.upper()}] {name} — {val} page(s)  ({secname}){flag}")
             print("Each blocker is a candidate task: where REPO / ACCESS names a repo, write a "
                   "ready-to-run Claude Code prompt to fix it there; where it says 'No repo / SEO "
                   "only', write 'Not a code change — ' + a client recommendation. Errors before warnings.")
@@ -707,11 +747,19 @@ def main():
                 seen.add(lp)
                 pages.append(lp)
         home = s["domain"] if s["domain"].startswith("http") else f"https://{s['domain']}"
-        print("\nPAGES TO FETCH before writing (read the live HTML so prompts cite the real "
-              "current <title>, meta description and H1):")
-        print(f"  - {home}")
-        for pg in pages[:4]:
-            print(f"  - {pg}")
+        # The agent used to be handed a "PAGES TO FETCH" list and told to fetch them
+        # itself. It didn't — it wrote from a stale memory of the site, and about one
+        # task in five was fabricated (see page_facts.py). So we fetch the pages here
+        # and hand it the observed values. It cannot invent a title it was never given.
+        targets = [home] + [p for p in pages[:4] if p and p != home]
+        try:
+            import page_facts
+            print(page_facts.brief(targets))
+        except Exception as e:
+            print(f"\nVERIFIED PAGE FACTS: unavailable this tick ({e}).")
+            print("Do NOT state any on-page fact (title, meta, H1, canonical, alt text) "
+                  "in a finding or a prompt. Raise only tasks that rest on the keyword "
+                  "and technical data above, or raise nothing.")
     elif emails:
         s = emails[0]
         ki = keyword_intel(s)

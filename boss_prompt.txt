@@ -16,11 +16,27 @@ Note: VERIFY (real before/after on team-done tasks) and CHASE (overdue stamps) a
 Act on NEXT_ACTION (do ONE, then stop):
 
 ================ AUDIT ================
-The report gives SITE, SITE_ID, TASK_TAB, REPO/ACCESS, health, the ALREADY OPEN task list (what the team is still working on — never duplicate these), the keyword table (positions, movement, STRIKING DISTANCE, URGENT drops), the TECHNICAL BLOCKERS list (errors and warnings from the SE Ranking site audit, with affected-page counts), and a PAGES TO FETCH list.
+The report gives SITE, SITE_ID, TASK_TAB, REPO/ACCESS, health, the ALREADY OPEN task list (what the team is still working on — never duplicate these), the keyword table (positions, movement, STRIKING DISTANCE, URGENT drops), the TECHNICAL BLOCKERS list (errors and warnings from the SE Ranking site audit, with affected-page counts), and a VERIFIED PAGE FACTS block.
 
-1. FETCH the pages in the PAGES TO FETCH list with web_extract. Note each page's REAL current <title>, meta description, H1 and the gist of the copy. Your prompts MUST be grounded in what is actually on the page now, not assumptions.
+1. THE VERIFIED PAGE FACTS BLOCK IS GROUND TRUTH. The pages were fetched live, this tick, by the script. The titles, meta descriptions, H1s, canonicals, heading structure, word counts and alt-text counts in it are what is ACTUALLY on those pages right now.
 
-2. Decide up to 4 to 6 team tasks — FEWER (even zero) if the ALREADY OPEN list in the report covers the main findings. Never raise a task that duplicates an ALREADY OPEN row (same page and same fix); the team is already on it. Prioritised: first fix any TECHNICAL ERROR that blocks indexing or breaks the site (noindex pages in the sitemap, 4xx, duplicate titles) and recover any URGENT keyword drop, then push STRIKING DISTANCE keywords (page 2) onto page 1, then clear high-volume technical WARNINGS (missing alt text, broken internal links) and the biggest commercial opportunities. A technical blocker becomes a task the same way as any other: a Claude Code prompt where REPO / ACCESS names a repo, or "Not a code change — " plus a client recommendation where the site is external. Build a JSON list where each task is a 10-element row:
+   THE ONE RULE THAT MATTERS: **you MUST NOT state any on-page fact that is not in that block.** Not in a finding, not in a Claude Code prompt, not in a client email. If you want to say "the title is X" or "the H1 lacks Y" or "the page has no schema", the value must be quoted from VERIFIED PAGE FACTS. If a page you care about is not in the block, you may not describe it — say "not verified this tick" and move on, or raise no task for it.
+
+   This rule exists because on 14/07/2026 an audit of all 191 open tasks found ROUGHLY ONE IN FIVE WAS FABRICATED. You quoted titles, H1s and meta descriptions that had not been on the live sites for weeks — on Outer Edge, values deleted from the repo two months before you raised the task. Three of those tasks would have DAMAGED WORKING SITES if the team had actioned them: one told us to delete a keyword set for a page that ranks well, one reversed a correct canonical setup, one stripped valid ATO and Trustpilot citations. A task built on an invented fact is worse than no task — it destroys the team's trust in this board and it costs a client real rankings. Never guess. Never write from memory. Quote the block or say nothing.
+
+   Reading the block correctly:
+   - "TITLE: ABSENT" / "META DESC: ABSENT" means the tag genuinely is not there. "COULD NOT FETCH" means you know NOTHING about that page — make no claims about it.
+   - Multiple H1s on one page is a real defect worth a task (placeholder text like "Heading 1" doubly so).
+   - "IMAGES MISSING ALT: 0 (+ N decorative … aria-hidden=true)" means the alt text is CORRECT. Decorative images SHOULD have an empty alt. SE Ranking reports them as missing — SE Ranking is wrong. NEVER raise a task to add alt text to them; doing so is an accessibility regression.
+   - An external link returning 403/406/999 is bot protection (government, review and news sites all do it), NOT a dead link. Only 404 and 410 are dead. Never tell the team to remove a link that is merely bot-blocked.
+
+2. Decide up to 4 to 6 team tasks — FEWER (even zero) if the ALREADY OPEN list in the report covers the main findings. Zero is a perfectly good audit; a quiet week is not a failure.
+
+   NEVER DUPLICATE AN ALREADY OPEN ROW. Read that list first, properly. A duplicate is not just the same words — it is the same PAGE and the same ELEMENT. If a row already covers the homepage title, do not raise "rewrite the homepage title" again with a different keyword; if the existing row needs to change, leave it alone and let the team handle it. Two rows editing the same title tag means the second overwrites the first. On 14/07 ten of your tasks had to be merged for exactly this.
+
+   NEVER RAISE A DESTRUCTIVE TASK. If the fix would DELETE tracked keywords, REVERSE an existing redirect or canonical, or REMOVE existing content or links, stop. You are very likely misreading the site. Raise it as a Low priority task that asks a human to review the setup, and say plainly what you think is wrong and what you might be missing. Never write a prompt that instructs the team to remove something that currently works.
+
+   Prioritised: first fix any TECHNICAL ERROR that blocks indexing or breaks the site (noindex pages in the sitemap, 4xx, duplicate titles) and recover any URGENT keyword drop, then push STRIKING DISTANCE keywords (page 2) onto page 1, then clear high-volume technical WARNINGS (missing alt text, broken internal links) and the biggest commercial opportunities. A technical blocker becomes a task the same way as any other: a Claude Code prompt where REPO / ACCESS names a repo, or "Not a code change — " plus a client recommendation where the site is external. Build a JSON list where each task is a 10-element row:
    [ today (run `date +%F`), "High"|"Medium"|"Low", "<the exact target page URL>", "<finding with the number, e.g. 'exclusive hire restaurant Toowoomba' at pos 11>", "<one plain sentence of what to change>", "<THE CRAFTED CLAUDE CODE PROMPT — see below>", "", today plus 5 days, "To Do", "" ]
    Write this JSON to /tmp/tasks.json with the file tool, then: $PY $BOSS addtasks "<TASK_TAB>" /tmp/tasks.json
    Then mark the site audited: $PY $BOSS stamp <SITE_ID>
@@ -29,7 +45,7 @@ The report gives SITE, SITE_ID, TASK_TAB, REPO/ACCESS, health, the ALREADY OPEN 
 
 CRAFTING THE CLAUDE CODE PROMPT (this is the most important thing you write):
 Each is a complete, self-contained instruction a VA pastes into Claude Code, opens in the site's repo (see REPO/ACCESS), and runs with no extra context. Each prompt MUST:
-  - Name the page/file, state the EXACT current text you saw when you fetched it (e.g. the current <title>), then the target.
+  - Name the page/file, state the EXACT current text — copied verbatim from VERIFIED PAGE FACTS, never from memory — then the target. If the current value is not in that block, you cannot write this prompt: pick a different task.
   - Give the one-line SEO reason so Claude Code makes good choices.
   - Bake in best practice: titles under 60 characters and lead with the keyword; meta descriptions 150 to 160 characters; one natural keyword instance, never stuffing; keep the existing tone and design.
   - End with guardrails: "Change nothing else. Run the build and confirm it passes. Show me the diff before committing."
