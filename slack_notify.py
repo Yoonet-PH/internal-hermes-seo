@@ -179,25 +179,68 @@ DETAIL_LINE = ("_Evidence, the affected page and a ready-to-run Claude Code prom
                "for each are on the tracker._")
 
 
+SUMMARY_MAX = 70
+# A floor as well as a ceiling. "Brief and publish two blog posts" breaks at " and "
+# after five characters — but that " and " joins two VERBS, not two clauses, and
+# "Brief" is not a summary. Anything under this is a fragment, so we keep looking.
+SUMMARY_MIN = 25
+
+# Real clause boundaries — cutting here leaves a complete thought behind.
+_STRONG_BREAKS = (". ", "; ", ", ", " — ", " and ", " or ", " so ", " that ")
+# Weaker joins, where a qualifier is bolted onto an already-finished phrase
+# ("Shorten the homepage title tag" | "to under 60 characters"). Tried only after
+# the strong breaks, because a preposition can also sit INSIDE a clause (or inside
+# a quoted keyword — "cash for cars"), where cutting at it strands what came before.
+_WEAK_BREAKS = (" to ", " with ", " from ", " into ", " for ", " at ", " of ",
+                " across ", " targeting ", " (")
+# A cut that ends on one of these — or on a bare number — is mid-thought, however
+# tidy its length. "…60 characters and lead" and "…to be between 150" both fit the
+# budget and both read as broken English.
+_DANGLING = {"and", "or", "to", "with", "that", "so", "the", "a", "an", "of", "in",
+             "for", "on", "at", "by", "from", "as", "into", "is", "be", "it", "its"}
+
+
+def _complete(s):
+    """Does this prefix read as a finished thought rather than a severed one?"""
+    words = s.rstrip(" ,;.").split()
+    if not words:
+        return False
+    last = words[-1].strip("'\"").lower()
+    return last not in _DANGLING and not last.isdigit()
+
+
 def _summary(t):
-    """A short headline for a task — "Shorten the homepage title tag", not the
-    full three-clause instruction.
+    """A headline for a task — "Shorten the homepage title tag" — not the full
+    three-clause instruction.
 
     Slack is a notice board, not the brief. The bullet says what the job IS so a
     developer can tell at a glance whether it is theirs; the tracker row carries
-    the how. Keeping the two separate stops the channel turning into a wall of
-    text that nobody reads — which is the failure mode we are trying to fix, not
-    reproduce in a new place."""
+    the how. Keeping the two apart stops the channel turning into the wall of text
+    nobody reads, which is the failure mode this whole layer exists to fix.
+
+    Never cuts mid-thought. It takes the LONGEST cut that both fits SUMMARY_MAX and
+    still reads as finished English, preferring real clause boundaries and only
+    falling back to prepositional joins when no clause boundary fits. So the budget
+    gets spent where there is something worth saying ("Add descriptive alt text to
+    all images across the 8 affected pages", 66) and not padded where there isn't
+    ("Add a new use-case page", 23). An ellipsis appears only if a single clause is
+    itself over budget — a badly written task, not a bug here."""
     s = " ".join((t.get("Recommended action") or "").split())
-    # First clause only. Take the EARLIEST break in the string, not the first
-    # separator that happens to match — otherwise a full stop late in the
-    # sentence wins over an " and " early in it and nothing gets cut.
-    cuts = [i for i in (s.find(sep) for sep in (". ", "; ", ", ", " and ", " so ",
-                                                " that ", " with ", " across "))
-            if i > 0]
-    if cuts:
-        s = s[:min(cuts)]
-    return _clip(s, 55) or "See the tracker"
+    if not s:
+        return "See the tracker"
+
+    def pick(breaks):
+        # Cuts must clear the floor; the whole action never has to, since a short
+        # instruction ("Identify all 5 broken URLs") is already its own summary.
+        cand = [c for c in (s[:i] for i in (s.find(b) for b in breaks) if i > 0)
+                if len(c) >= SUMMARY_MIN] + [s]
+        good = [c for c in cand if len(c) <= SUMMARY_MAX and _complete(c)]
+        return max(good, key=len).rstrip(" ,;:—-") if good else None
+
+    return (pick(_STRONG_BREAKS)
+            or pick(_STRONG_BREAKS + _WEAK_BREAKS)
+            # Nothing readable fits: trim at a word boundary, never mid-word.
+            or (s[:SUMMARY_MAX].rsplit(" ", 1)[0].rstrip(" ,;:—-") + "…"))
 
 
 def _bullet(t, show_owner=False):

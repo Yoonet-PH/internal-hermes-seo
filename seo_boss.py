@@ -314,6 +314,15 @@ def site_task_state(tab, rows=None):
     recs, _ = rows_as_dicts(rows)
     open_tasks, overdue, done_unver, completed_recent = [], [], [], []
     for d in recs:
+        # A site tab holds a SECOND table to the right (the Technical Health block
+        # the daily sweep writes from column L). Those rows have empty task columns,
+        # and since "" is an OPEN status a blank Status made every one of them count
+        # as an open task — 55 phantom tasks across the board, inflating the Open
+        # Tasks column and, once Slack was wired up, ready to post empty bullets.
+        # A row with no date and nothing recommended is not a task.
+        if not (d.get("Date Raised", "").strip()
+                or d.get("Recommended action", "").strip()):
+            continue
         status = d.get("Status", "").strip().lower()
         if status in OPEN_STATUSES:
             open_tasks.append(d)
