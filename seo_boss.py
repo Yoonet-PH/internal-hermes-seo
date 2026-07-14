@@ -27,6 +27,7 @@ action site from seo_intel.keyword_intel_v2 (GSC where wired, else DataForSEO).
 SE Ranking remains only as the technical site-audit crawler (audit_blockers).
 """
 import json
+import os
 import sys
 import datetime
 import urllib.request
@@ -44,7 +45,7 @@ MCP_URL = "https://api.seranking.com/mcp"
 REGISTRY_HEADER = ["Site", "Domain", "Type", "Brand", "Status", "Repo / Access",
                    "SE Ranking ID", "Keywords", "Visibility %", "In Top 10", "Avg Pos",
                    "Movement", "Last Audited", "Last Client Update", "Open Tasks",
-                   "Next Review", "Date Added", "Notes"]
+                   "Next Review", "Date Added", "Notes", "Slack Channel"]
 # Human-maintained Status values that take a site out of the audit/email rota
 # (kept in the registry, but the Boss does no LLM work on them).
 SKIP_AUDIT_STATUSES = {"pre-launch", "prelaunch", "parked", "setup needed",
@@ -394,6 +395,7 @@ def build_sites():
             "repo": pv.get("Repo / Access", ""),
             "type": pv.get("Type", ""), "brand": pv.get("Brand", ""),
             "status": pv.get("Status", ""), "notes": pv.get("Notes", ""),
+            "slack": pv.get("Slack Channel", ""),
             "added": (pv.get("Date Added") or "").strip() or tstr(),
             "open": len(open_tasks), "open_tasks": open_tasks,
             "overdue": overdue,
@@ -409,15 +411,16 @@ def write_registry(sites):
                     datetime.timedelta(days=AUDIT_CADENCE_DAYS)).isoformat() if la else tstr()
         except Exception:
             return tstr()
+    ordered = sorted(sites, key=lambda s: (s["title"] or "").strip().lower())
     update_range(f"'{REGISTRY_TAB}'!A1", [REGISTRY_HEADER] + [[
         s["title"], s["domain"], s.get("type", ""), s.get("brand", ""),
         s.get("status", ""), s.get("repo", ""), s["sid"], s["keywords"],
         s["vis"], s["top10"], s["avg"], s["move"], s["last_audited"],
         s["last_email"], s["open"], nxt(s["last_audited"]), s.get("added", ""),
-        s.get("notes", ""),
-    ] for s in sites])
+        s.get("notes", ""), s.get("slack", ""),
+    ] for s in ordered])
     _execute(SHEETS.values().clear(spreadsheetId=SHEET_ID,
-                                   range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:R1000"))
+                                   range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:S1000"))
 
 
 def do_verifications(sites):
@@ -445,7 +448,8 @@ def do_verifications(sites):
                           "measure. Check again at next audit")
             update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
                          [["Verified", result]])
-            done.append(f"'{s['title']}' row {t['_row']}: {result}")
+            done.append({"site": s["title"], "row": t["_row"], "result": result,
+                         "line": f"'{s['title']}' row {t['_row']}: {result}"})
     return done
 
 
@@ -463,7 +467,8 @@ def do_chases(sites):
                     "today or escalate")
             update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
                          [["Overdue", note]])
-            done.append(f"'{s['title']}' row {t['_row']} (due {t.get('Due', '')})")
+            done.append({"site": s["title"], "row": t["_row"], "task": t,
+                         "line": f"'{s['title']}' row {t['_row']} (due {t.get('Due', '')})"})
     return done
 
 
@@ -568,14 +573,28 @@ def main():
     chased = do_chases(sites)
     if verified:
         print(f"HOUSEKEEPING — verified {len(verified)} done task(s) from position history:")
-        for line in verified:
-            print(f"  - {line}")
+        for v in verified:
+            print(f"  - {v['line']}")
         print()
     if chased:
         print(f"HOUSEKEEPING — stamped {len(chased)} overdue task(s):")
-        for line in chased:
-            print(f"  - {line}")
+        for c in chased:
+            print(f"  - {c['line']}")
         print()
+
+    # Slack delivery. Sites with an empty "Slack Channel" cell are skipped, so
+    # this is a no-op until a channel is filled in. Never fatal: the tick's real
+    # job is the sheet, and Slack being down must not fail the cron.
+    try:
+        import slack_notify
+        posted = slack_notify.deliver(sites, verified, chased)
+        if posted:
+            print(f"SLACK — {len(posted)} delivery action(s):")
+            for line in posted:
+                print(line)
+            print()
+    except Exception as e:
+        print(f"SLACK — delivery skipped ({e})\n")
 
     due = sorted([s for s in sites if audit_due(s)], key=lambda s: (s["last_audited"] or "0000"))
     emails = [s for s in sites if email_due(s)]
@@ -737,8 +756,51 @@ def digest():
           f"{tot_done} completed in last 30 days.")
 
 
+def slack_backlog(only=None):
+    """One-off catch-up post per channel: where the site stands today.
+
+    The tick itself is deliberately silent about pre-existing tasks (it seeds
+    state on first sight), so this is how a channel gets introduced to its
+    standing backlog — once, as a summary, rather than 248 individual posts.
+    Also seeds the seen-state, so the next tick announces only genuinely new work.
+
+    `only` limits it to one site (by tab name). Safe to re-run: it re-posts the
+    summary, it does not duplicate task announcements."""
+    import slack_notify
+    sites = build_sites()
+    sent = 0
+    for s in sites:
+        channel = (s.get("slack") or "").strip()
+        if not channel or (only and s["title"] != only):
+            continue
+        msg = slack_notify.backlog_msg(s["title"], s["open_tasks"], s["overdue"])
+        if slack_notify.post(channel, msg):
+            sent += 1
+            print(f"posted backlog for '{s['title']}' -> {channel} "
+                  f"({len(s['open_tasks'])} open, {len(s['overdue'])} overdue)")
+        state = slack_notify.load_state()
+        state[s["title"]] = sorted(slack_notify.task_key(t) for t in s["open_tasks"])
+        slack_notify.save_state(state)
+    if not sent:
+        print("no sites posted — is the 'Slack Channel' column filled in? "
+              "(set SLACK_DRY_RUN=1 to preview without a token)")
+    return 0
+
+
 if __name__ == "__main__":
-    if len(sys.argv) >= 3 and sys.argv[1] == "stamp":
+    if len(sys.argv) >= 2 and sys.argv[1] == "slack-test":
+        # slack-test <channel>  — prove the token and the channel invite work
+        import slack_notify
+        if not slack_notify.enabled() and os.environ.get("SLACK_DRY_RUN") != "1":
+            sys.exit("no SLACK_BOT_TOKEN in env or ~/.hermes/.env")
+        ch = sys.argv[2] if len(sys.argv) >= 3 else ""
+        ok = slack_notify.post(ch, ":satellite: Hermes SEO Boss can post here. "
+                                   "Site updates will follow.")
+        print("posted" if ok else "FAILED — see the error above")
+        sys.exit(0 if ok else 1)
+    elif len(sys.argv) >= 2 and sys.argv[1] == "slack-backlog":
+        sys.exit(slack_backlog(sys.argv[2] if len(sys.argv) >= 3 else None))
+    elif len(sys.argv) >= 3 and sys.argv[1] == "stamp":
         stamp("Last Audited", sys.argv[2])
     elif len(sys.argv) >= 3 and sys.argv[1] == "stamp-email":
         stamp("Last Client Update", sys.argv[2])
