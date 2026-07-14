@@ -153,14 +153,26 @@ def tab_titles(force=False):
     return _TAB_TITLES_CACHE
 
 
-def ensure_tab(title, header):
-    if title not in tab_titles():
+def ensure_tab(title, header, write_header=True):
+    """Create the tab if missing and put `header` on row 1.
+
+    write_header=False writes the header ONLY when the tab is actually created.
+    build_sites() calls this for every site on every 30-minute tick, and
+    unconditionally rewriting 26 header rows spent 26 of the 60 writes/min/user
+    quota re-doing work that was already correct — the single biggest source of
+    the HTTP 429s. Callers that pass write_header=False are responsible for
+    noticing a header that has drifted (build_sites does, from its batched read).
+    Returns True if the tab was created."""
+    created = title not in tab_titles()
+    if created:
         _execute(SHEETS.batchUpdate(spreadsheetId=SHEET_ID, body={
             "requests": [{"addSheet": {"properties": {"title": title}}}]}))
         if _TAB_TITLES_CACHE is not None:   # keep cache in sync, no re-fetch
             _TAB_TITLES_CACHE.append(title)
-    _execute(SHEETS.values().update(spreadsheetId=SHEET_ID, range=f"'{title}'!A1",
-                                    valueInputOption="RAW", body={"values": [header]}))
+    if created or write_header:
+        _execute(SHEETS.values().update(spreadsheetId=SHEET_ID, range=f"'{title}'!A1",
+                                        valueInputOption="RAW", body={"values": [header]}))
+    return created
 
 
 def read_tab(title, rng="A1:Z1000"):
@@ -168,6 +180,27 @@ def read_tab(title, rng="A1:Z1000"):
         return []
     return _execute(SHEETS.values().get(
         spreadsheetId=SHEET_ID, range=f"'{title}'!{rng}")).get("values", [])
+
+
+def read_tabs(titles, rng="A1:Z1000"):
+    """Read many tabs in ONE Sheets call. Returns {title: rows}.
+
+    build_sites() reads one tab per site. At 26 sites that was 26 of the 60
+    reads/min/user quota on every 30-minute tick, leaving too little headroom: any
+    second reader in the same minute — a manual run, slack-backlog, the tech
+    sweep, the digest — tipped the tick into HTTP 429 and lost it silently. Worse,
+    the cost grew linearly, so a big enough registry would have failed on its own.
+    batchGet collapses the per-site reads into a single request, so a tick now
+    costs a handful of reads regardless of how many sites we monitor."""
+    known = [t for t in titles if t in tab_titles()]
+    out = {t: [] for t in titles}
+    if not known:
+        return out
+    res = _execute(SHEETS.values().batchGet(
+        spreadsheetId=SHEET_ID, ranges=[f"'{t}'!{rng}" for t in known]))
+    for title, vr in zip(known, res.get("valueRanges", [])):
+        out[title] = vr.get("values", [])
+    return out
 
 
 def update_range(rng, values):
@@ -274,8 +307,10 @@ def audit_blockers(domain):
 
 
 # --- per-site task state ---
-def site_task_state(tab):
-    rows = read_tab(tab)
+def site_task_state(tab, rows=None):
+    """Task state for one site tab. Pass `rows` to reuse a batched read (see
+    read_tabs) instead of spending another Sheets read here."""
+    rows = read_tab(tab) if rows is None else rows
     recs, _ = rows_as_dicts(rows)
     open_tasks, overdue, done_unver, completed_recent = [], [], [], []
     for d in recs:
@@ -355,13 +390,30 @@ def build_sites():
     hist = _history_by_domain()
     sites = []
     seen_domains = set()
+
+    # Resolve the roster first, so every site tab can be read in a single
+    # batched call below rather than one Sheets read apiece (see read_tabs).
+    roster = []
     for pv in prev:
         domain = (pv.get("Domain") or "").strip()
         title = safe_tab_name((pv.get("Site") or "").strip() or domain)
         if not domain or _bare_domain(domain) in seen_domains:
             continue
         seen_domains.add(_bare_domain(domain))
-        ensure_tab(title, TASK_HEADER)
+        ensure_tab(title, TASK_HEADER, write_header=False)
+        roster.append((pv, domain, title))
+    tab_rows = read_tabs([title for _, _, title in roster])
+
+    # Self-heal a drifted header. ensure_tab no longer rewrites it every tick, so
+    # repair it here instead — from rows we have already read, and only when it is
+    # genuinely wrong (i.e. after TASK_HEADER changes, not 26 times an hour).
+    for title in list(tab_rows):
+        rows = tab_rows[title]
+        if rows and rows[0][:len(TASK_HEADER)] != TASK_HEADER:
+            update_range(f"'{title}'!A1", [TASK_HEADER])
+            print(f"# repaired header on '{title}'", file=sys.stderr)
+
+    for pv, domain, title in roster:
         bd = _bare_domain(domain)
         kws = [(t.get("Keyword") or "").strip().lower()
                for t in tracked if _bare_domain(t.get("Domain")) == bd]
@@ -383,7 +435,8 @@ def build_sites():
         if deltas:
             md = round(sum(deltas) / len(deltas))
             move = f"{'+' if md > 0 else ''}{md}"
-        open_tasks, overdue, done_unver, completed = site_task_state(title)
+        open_tasks, overdue, done_unver, completed = site_task_state(
+            title, rows=tab_rows.get(title))
         sites.append({
             "sid": str(pv.get("SE Ranking ID") or "").strip() or bd,
             "title": title, "domain": domain,
