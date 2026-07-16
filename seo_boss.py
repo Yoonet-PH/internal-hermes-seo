@@ -57,6 +57,10 @@ TASK_HEADER = ["Date Raised", "Priority", "Target page", "Finding (evidence)",
 EMAIL_HEADER = ["Date Drafted", "Site", "Subject", "Body (review and send)", "Status"]
 OPEN_STATUSES = {"", "to do", "todo", "in progress", "overdue", "escalated"}
 DONE_STATUSES = {"done", "complete", "completed"}
+# Everything do_verifications can write into Result starts with one of these —
+# a Done row whose Result starts differently has NOT been verified yet.
+VERIFIED_PREFIXES = ("Worked:", "Gone backwards:", "No movement yet:",
+                     "Verified at face value")
 
 sys.path.insert(0, str(HERMES_HOME / "skills/productivity/google-workspace/scripts"))
 from googleapiclient.discovery import build  # noqa: E402
@@ -331,11 +335,11 @@ def site_task_state(tab, rows=None):
             due = d.get("Due", "").strip()
             if due and due < tstr():
                 overdue.append(d)
-        elif status in DONE_STATUSES and (not result
-                                          or result.startswith("Overdue since")):
-            # A chase stamp left over from before the team marked the row Done
-            # is not a verification result — without this, a task that was ever
-            # chased can never be verified.
+        elif status in DONE_STATUSES and not result.startswith(VERIFIED_PREFIXES):
+            # Only the verifier's own output counts as verified — anything else
+            # in Result is a leftover chase stamp or a team completion note
+            # (the team uses Result to say what they did). Both used to block
+            # verification forever; notes are preserved when the result lands.
             done_unver.append(d)
         elif status in (DONE_STATUSES | {"verified"}):
             dr = d.get("Date Raised", "").strip()
@@ -527,6 +531,9 @@ def do_verifications(sites):
             else:
                 result = ("Verified at face value, no single tracked keyword to "
                           "measure. Check again at next audit")
+            note = t.get("Result", "").strip()
+            if note and not note.startswith("Overdue since"):
+                result = f"{note} — {result}"
             update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
                          [["Verified", result]])
             done.append({"site": s["title"], "row": t["_row"], "result": result,
