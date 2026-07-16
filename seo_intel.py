@@ -166,6 +166,10 @@ def read_history(domain, kw, days=35):
             continue
         if (d.get("Keyword", "") or "").strip().lower() != k:
             continue
+        if (d.get("Source") or "").startswith("error"):
+            # Failed lookups are recorded as pos 999 for telemetry — treating
+            # them as measurements turns a feed outage into fake movement.
+            continue
         date = (d.get("Date") or "").strip()
         if date and date >= cutoff:
             try:

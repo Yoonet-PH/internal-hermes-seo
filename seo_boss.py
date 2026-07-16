@@ -176,14 +176,14 @@ def ensure_tab(title, header, write_header=True):
     return created
 
 
-def read_tab(title, rng="A1:Z1000"):
+def read_tab(title, rng="A1:Z100000"):
     if title not in tab_titles():
         return []
     return _execute(SHEETS.values().get(
         spreadsheetId=SHEET_ID, range=f"'{title}'!{rng}")).get("values", [])
 
 
-def read_tabs(titles, rng="A1:Z1000"):
+def read_tabs(titles, rng="A1:Z100000"):
     """Read many tabs in ONE Sheets call. Returns {title: rows}.
 
     build_sites() reads one tab per site. At 26 sites that was 26 of the 60
@@ -325,12 +325,17 @@ def site_task_state(tab, rows=None):
                 or d.get("Recommended action", "").strip()):
             continue
         status = d.get("Status", "").strip().lower()
+        result = d.get("Result", "").strip()
         if status in OPEN_STATUSES:
             open_tasks.append(d)
             due = d.get("Due", "").strip()
             if due and due < tstr():
                 overdue.append(d)
-        elif status in DONE_STATUSES and not d.get("Result", "").strip():
+        elif status in DONE_STATUSES and (not result
+                                          or result.startswith("Overdue since")):
+            # A chase stamp left over from before the team marked the row Done
+            # is not a verification result — without this, a task that was ever
+            # chased can never be verified.
             done_unver.append(d)
         elif status in (DONE_STATUSES | {"verified"}):
             dr = d.get("Date Raised", "").strip()
@@ -351,6 +356,11 @@ def verify_result(task, kintel):
                 best = k
     if not best:
         return None
+    if str(best.get("source", "")).startswith("error"):
+        # The rank feed errored for this keyword (e.g. DataForSEO 402) — pos_now
+        # is a placeholder 999, not a measurement. Verifying now would write a
+        # false "Gone backwards". Leave the row for a tick with real data.
+        return {"skip": True, "kw": best["kw"]}
     pos_then = None
     for d, p in best["series"]:
         if raised and d >= raised:
@@ -377,6 +387,10 @@ def _history_by_domain(days=35):
         kw = (d.get("Keyword") or "").strip().lower()
         date = (d.get("Date") or "").strip()
         if not (dom and kw and date) or date < cutoff:
+            continue
+        if (d.get("Source") or "").startswith("error"):
+            # Failed lookups are recorded as pos 999 for telemetry; counting
+            # them here turns a feed outage into a fake mass ranking drop.
             continue
         try:
             pos = int(float(d.get("Position") or 999))
@@ -496,6 +510,10 @@ def do_verifications(sites):
         ki = keyword_intel(s)
         for t in s["done_unver"]:
             vr = verify_result(t, ki)
+            if vr and vr.get("skip"):
+                print(f"HOUSEKEEPING — '{s['title']}' row {t['_row']}: verification "
+                      f"deferred, rank feed errored for '{vr['kw']}'")
+                continue
             if vr:
                 if vr["delta"] > 0:
                     result = (f"Worked: '{vr['kw']}' moved {fmt_pos(vr['then'])} "
@@ -704,13 +722,26 @@ def main():
                       f"{(t.get('Target page', '') or '-')[:60]}")
                 print(f"      FINDING: {(t.get('Finding (evidence)', '') or '')[:150]}")
                 print(f"      ACTION:  {(t.get('Recommended action', '') or '')[:110]}")
-        striking = [k for k in ki if k["striking"]]
-        drops = [k for k in ki if k["pos_prev"] < 900 and k["change"] <= -10]
+        def feed_error(k):
+            return str(k.get("source", "")).startswith("error")
+        striking = [k for k in ki if k["striking"] and not feed_error(k)]
+        drops = [k for k in ki if k["pos_prev"] < 900 and k["change"] <= -10
+                 and not feed_error(k)]
+        errored = [k for k in ki if feed_error(k)]
         print("\nKEYWORDS (tracked — position now, 35d movement, landing page):")
         for k in ki[:25]:
+            if feed_error(k):
+                print(f"  - \"{k['kw']}\": position data UNAVAILABLE this tick "
+                      "(rank feed error) — NOT a drop, draw no conclusion from it")
+                continue
             flag = "  <-- STRIKING DISTANCE (page 2, quick win)" if k["striking"] else ""
             print(f"  - \"{k['kw']}\": pos {fmt_pos(k['pos_now'])} "
                   f"({move_label(k['pos_prev'], k['pos_now'])})  page: {k['landing'] or '-'}{flag}")
+        if errored:
+            print(f"\nNOTE: the rank feed errored for {len(errored)} of {len(ki)} keywords "
+                  "this tick. Do NOT describe rankings as dropped, collapsed or lost, and "
+                  "do NOT raise ranking-drop tasks or mention visibility in the client "
+                  "email — there is no position data to support it.")
         if drops:
             print(f"\nURGENT — {len(drops)} keyword(s) dropped 10+ places, investigate why: "
                   + ", ".join(f"'{k['kw']}' ({move_label(k['pos_prev'], k['pos_now'])})" for k in drops))
