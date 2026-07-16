@@ -335,11 +335,11 @@ def site_task_state(tab, rows=None):
             due = d.get("Due", "").strip()
             if due and due < tstr():
                 overdue.append(d)
-        elif status in DONE_STATUSES and not result.startswith(VERIFIED_PREFIXES):
-            # Only the verifier's own output counts as verified — anything else
-            # in Result is a leftover chase stamp or a team completion note
-            # (the team uses Result to say what they did). Both used to block
-            # verification forever; notes are preserved when the result lands.
+        elif status in DONE_STATUSES:
+            # Status is the only signal: verification flips a row to Verified,
+            # so anything still Done is unverified regardless of what's in
+            # Result (a chase stamp, or a team note saying what they did —
+            # notes are preserved when the result lands). Ben's rule, 16/07.
             done_unver.append(d)
         elif status in (DONE_STATUSES | {"verified"}):
             dr = d.get("Date Raised", "").strip()
@@ -532,7 +532,7 @@ def do_verifications(sites):
                 result = ("Verified at face value, no single tracked keyword to "
                           "measure. Check again at next audit")
             note = t.get("Result", "").strip()
-            if note and not note.startswith("Overdue since"):
+            if note and not note.startswith(("Overdue since",) + VERIFIED_PREFIXES):
                 result = f"{note} — {result}"
             update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
                          [["Verified", result]])
