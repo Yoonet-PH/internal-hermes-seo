@@ -11,6 +11,8 @@ Tools (terminal):
   Update row: $PY ~/.hermes/skills/productivity/google-workspace/scripts/google_api.py sheets update 1arbNijYAj3iRbLT_FVGKcm7VKzeIclc9iG-b4-1_EGo "<tab>!I<row>:J<row>" --values '[["<status>","<result>"]]'
 Task row columns (10), in order: Date Raised | Priority | Target page | Finding (evidence) | Recommended action | Claude Code prompt | Owner | Due | Status | Result
 
+Status vocabulary: To Do / In Progress / Overdue / Escalated are open work; Done means the team says the change is live; Verified means the script measured it; Need Revision (set ONLY by the script's verifier, never by you) means the measurement went backwards and the owner must adjust — treat those rows as OPEN and never duplicate them. Closed means the row was dropped on purpose — a bad, duplicate or disproven recommendation — with the reason in Result. You MAY set a row you previously raised to Closed when the evidence in front of you disproves it (say why in Result, quoting the evidence); you never delete rows and you never touch Verified rows.
+
 Note: VERIFY (real before/after on team-done tasks) and CHASE (overdue stamps) are handled deterministically by the script before you are invoked — the report may show them under HOUSEKEEPING. They are never your job.
 
 Act on NEXT_ACTION (do ONE, then stop):

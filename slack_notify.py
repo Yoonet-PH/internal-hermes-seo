@@ -325,7 +325,11 @@ def deliver(sites, verified, chased):
             continue
 
         seen = set(known)
-        fresh = [t for t in s["open_tasks"] if task_key(t) not in seen]
+        # Rows the verifier just flipped to Need Revision are open again but not
+        # new — the owner already got the "gone backwards" measurement post.
+        fresh = [t for t in s["open_tasks"] if task_key(t) not in seen
+                 and t.get("Status", "").strip().lower()
+                 not in ("need revision", "needs revision")]
         if fresh and post(channel, new_tasks_msg(title, fresh)):
             log.append(f"  - {title}: posted {len(fresh)} new task(s) to {channel}")
         # Mark as seen either way: a Slack failure must not queue up a duplicate

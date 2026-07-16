@@ -55,8 +55,14 @@ TASK_HEADER = ["Date Raised", "Priority", "Target page", "Finding (evidence)",
                "Recommended action", "Claude Code prompt (paste into Claude Code)",
                "Owner", "Due", "Status", "Result"]
 EMAIL_HEADER = ["Date Drafted", "Site", "Subject", "Body (review and send)", "Status"]
-OPEN_STATUSES = {"", "to do", "todo", "in progress", "overdue", "escalated"}
+OPEN_STATUSES = {"", "to do", "todo", "in progress", "overdue", "escalated",
+                 "need revision", "needs revision"}
 DONE_STATUSES = {"done", "complete", "completed"}
+# "Closed" (team or Boss: recommendation not worth applying, duplicate, disproven)
+# and "Verified" sit outside both sets on purpose — the Boss never re-processes
+# them. A Closed row keeps its text; the Result column says why it was dropped.
+# "Need Revision" is OPEN: the verifier sets it when a Done change measured worse,
+# and the owner is expected to adjust and set the row back to Done.
 # Everything do_verifications can write into Result starts with one of these —
 # a Done row whose Result starts differently has NOT been verified yet.
 VERIFIED_PREFIXES = ("Worked:", "Gone backwards:", "No movement yet:",
@@ -518,13 +524,16 @@ def do_verifications(sites):
                 print(f"HOUSEKEEPING — '{s['title']}' row {t['_row']}: verification "
                       f"deferred, rank feed errored for '{vr['kw']}'")
                 continue
+            new_status = "Verified"
             if vr:
                 if vr["delta"] > 0:
                     result = (f"Worked: '{vr['kw']}' moved {fmt_pos(vr['then'])} "
                               f"to {fmt_pos(vr['now'])} over 35 days")
                 elif vr["delta"] < 0:
+                    new_status = "Need Revision"
                     result = (f"Gone backwards: '{vr['kw']}' was {fmt_pos(vr['then'])}, "
-                              f"now {fmt_pos(vr['now'])}. Review at next audit")
+                              f"now {fmt_pos(vr['now'])}. Owner to revisit the change "
+                              "and set the row back to Done to re-measure")
                 else:
                     result = (f"No movement yet: '{vr['kw']}' still at "
                               f"{fmt_pos(vr['now'])}, keep pushing")
@@ -535,7 +544,7 @@ def do_verifications(sites):
             if note and not note.startswith(("Overdue since",) + VERIFIED_PREFIXES):
                 result = f"{note} — {result}"
             update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
-                         [["Verified", result]])
+                         [[new_status, result]])
             done.append({"site": s["title"], "row": t["_row"], "result": result,
                          "line": f"'{s['title']}' row {t['_row']}: {result}"})
     return done
@@ -547,12 +556,23 @@ def do_chases(sites):
     done = []
     for s in sites:
         for t in s["overdue"]:
-            if (t.get("Status", "").strip().lower() == "overdue"
-                    and t.get("Result", "").strip()):
+            st = t.get("Status", "").strip().lower()
+            res = t.get("Result", "").strip()
+            if st == "overdue" and res:
                 continue
             note = (f"Overdue since {t.get('Due', '')}. Owner "
                     f"{t.get('Owner', '').strip() or 'UNASSIGNED'}: action this "
                     "today or escalate")
+            if st in ("need revision", "needs revision"):
+                # Keep the verifier's feedback and the status — a revision
+                # request must not be flattened into a generic overdue stamp.
+                if "Overdue since" in res:
+                    continue
+                update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
+                             [["Need Revision", f"{res} — {note}" if res else note]])
+                done.append({"site": s["title"], "row": t["_row"], "task": t,
+                             "line": f"'{s['title']}' row {t['_row']} (due {t.get('Due', '')})"})
+                continue
             update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
                          [["Overdue", note]])
             done.append({"site": s["title"], "row": t["_row"], "task": t,
