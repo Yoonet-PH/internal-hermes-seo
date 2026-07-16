@@ -164,6 +164,23 @@ def tab_titles(force=False):
     return _TAB_TITLES_CACHE
 
 
+STATUS_OPTIONS = ["To Do", "In Progress", "Done", "Verified", "Overdue",
+                  "Need Revision", "Closed"]
+
+
+def set_status_validation(sheet_id):
+    """Strict dropdown on the Status column (I) so the team can only pick real
+    statuses. Unbounded below row 1 so it survives the tab growing."""
+    _execute(SHEETS.batchUpdate(spreadsheetId=SHEET_ID, body={"requests": [{
+        "setDataValidation": {
+            "range": {"sheetId": sheet_id, "startRowIndex": 1,
+                      "startColumnIndex": 8, "endColumnIndex": 9},
+            "rule": {"condition": {"type": "ONE_OF_LIST",
+                                   "values": [{"userEnteredValue": v}
+                                              for v in STATUS_OPTIONS]},
+                     "strict": True, "showCustomUi": True}}}]}))
+
+
 def ensure_tab(title, header, write_header=True):
     """Create the tab if missing and put `header` on row 1.
 
@@ -176,10 +193,13 @@ def ensure_tab(title, header, write_header=True):
     Returns True if the tab was created."""
     created = title not in tab_titles()
     if created:
-        _execute(SHEETS.batchUpdate(spreadsheetId=SHEET_ID, body={
+        resp = _execute(SHEETS.batchUpdate(spreadsheetId=SHEET_ID, body={
             "requests": [{"addSheet": {"properties": {"title": title}}}]}))
         if _TAB_TITLES_CACHE is not None:   # keep cache in sync, no re-fetch
             _TAB_TITLES_CACHE.append(title)
+        if header == TASK_HEADER:           # site task boards get the dropdown
+            set_status_validation(
+                resp["replies"][0]["addSheet"]["properties"]["sheetId"])
     if created or write_header:
         _execute(SHEETS.values().update(spreadsheetId=SHEET_ID, range=f"'{title}'!A1",
                                         valueInputOption="RAW", body={"values": [header]}))
