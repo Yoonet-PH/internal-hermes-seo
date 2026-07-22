@@ -31,16 +31,29 @@ import os
 import re
 import sys
 import datetime
-import subprocess
 import urllib.request
 from pathlib import Path
 
 HERMES_HOME = Path.home() / ".hermes"
-HERMES_BIN = HERMES_HOME / "hermes-agent/venv/bin/hermes"
-# Where a balance run-down alert is pushed, and the band we last told Ben about
-# (so the ping fires once per crossing, not every 30-minute tick).
-DFS_ALERT_TARGET = os.environ.get("DFS_ALERT_TARGET", "telegram")
+# Balance run-down alerts go to Em on Slack (via the hermes_seo bot), NOT to Ben's
+# Telegram — he stays fully involved but does not want the reload pings. The target
+# is her Slack Member ID (DM) or a channel id, read fresh each tick from env or the
+# ~/.hermes/.env file (SEO_ALERT_SLACK_CHANNEL); empty = no push (the Ops Health
+# flag + banner still stand). The band we last told her about is remembered so the
+# ping fires once per crossing.
 DFS_ALERT_STATE = HERMES_HOME / "state" / "dfs_balance_alert.json"
+
+
+def _alert_slack_channel():
+    v = os.environ.get("SEO_ALERT_SLACK_CHANNEL")
+    if v:
+        return v.strip()
+    try:
+        env = (HERMES_HOME / ".env").read_text()
+        m = re.search(r"^#?\s*SEO_ALERT_SLACK_CHANNEL=(.+)$", env, re.M)
+        return m.group(1).strip().strip('"').strip("'") if m else ""
+    except Exception:
+        return ""
 SHEET_ID = "1arbNijYAj3iRbLT_FVGKcm7VKzeIclc9iG-b4-1_EGo"
 REGISTRY_TAB = "Monitored Sites"
 EMAILS_TAB = "Client Emails"
@@ -835,10 +848,11 @@ def _dfs_alert(bal):
     # First-ever run with no prior state: only speak up if we start in trouble.
     if prev is None and band == "ok":
         msg = None
-    if msg:
+    channel = _alert_slack_channel()
+    if msg and channel:
         try:
-            subprocess.run([str(HERMES_BIN), "send", "-t", DFS_ALERT_TARGET, "-q", msg],
-                           timeout=25, check=False)
+            import slack_notify
+            slack_notify.post(channel, msg)
         except Exception as e:
             print(f"# dfs balance alert send failed ({e})", file=sys.stderr)
     try:
