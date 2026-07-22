@@ -31,16 +31,28 @@ import os
 import re
 import sys
 import datetime
+import subprocess
 import urllib.request
 from pathlib import Path
 
 HERMES_HOME = Path.home() / ".hermes"
+HERMES_BIN = HERMES_HOME / "hermes-agent/venv/bin/hermes"
+# Where a balance run-down alert is pushed, and the band we last told Ben about
+# (so the ping fires once per crossing, not every 30-minute tick).
+DFS_ALERT_TARGET = os.environ.get("DFS_ALERT_TARGET", "telegram")
+DFS_ALERT_STATE = HERMES_HOME / "state" / "dfs_balance_alert.json"
 SHEET_ID = "1arbNijYAj3iRbLT_FVGKcm7VKzeIclc9iG-b4-1_EGo"
 REGISTRY_TAB = "Monitored Sites"
 EMAILS_TAB = "Client Emails"
 DIGEST_TAB = "Weekly Digest"
 AUDIT_CADENCE_DAYS = 7
 CLIENT_UPDATE_CADENCE_DAYS = 30
+# A live on-page change gets this long to be reflected by Google before the
+# verifier is allowed to judge it a failure. Under it, a not-yet-improved change
+# sits at "Verifying", not "Need Revision" — done correctly, just not confirmed.
+DIGEST_DAYS = 14
+# Sub-this-many-place moves are rank jitter, not a regression worth flagging.
+NOISE_POSITIONS = 3
 MCP_URL = "https://api.seranking.com/mcp"
 
 REGISTRY_HEADER = ["Site", "Domain", "Type", "Brand", "Status", "Repo / Access",
@@ -61,11 +73,16 @@ DONE_STATUSES = {"done", "complete", "completed"}
 # "Closed" (team or Boss: recommendation not worth applying, duplicate, disproven)
 # and "Verified" sit outside both sets on purpose — the Boss never re-processes
 # them. A Closed row keeps its text; the Result column says why it was dropped.
-# "Need Revision" is OPEN: the verifier sets it when a Done change measured worse,
-# and the owner is expected to adjust and set the row back to Done.
-# Everything do_verifications can write into Result starts with one of these —
-# a Done row whose Result starts differently has NOT been verified yet.
-VERIFIED_PREFIXES = ("Worked:", "Gone backwards:", "No movement yet:",
+# "Verifying" is a HOLDING state (re-checked every tick like Done): the change is
+# made and correct as far as we can tell, but not yet confirmed — Google needs
+# time, or the rank feed is down. "Need Revision" is OPEN and stronger: only set
+# once the digestion window has passed AND the change measurably went backwards,
+# i.e. the work itself looks wrong or incomplete and the owner must revisit it.
+# Everything do_verifications writes into Result starts with one of these — a
+# Done row whose Result starts differently has NOT been verified yet. The token
+# "since YYYY-MM-DD" inside a Verifying note is the measurement clock.
+VERIFIED_PREFIXES = ("Worked:", "Held:", "Measuring:", "Feed down:",
+                     "Needs rework:", "Gone backwards:", "No movement yet:",
                      "Verified at face value")
 
 sys.path.insert(0, str(HERMES_HOME / "skills/productivity/google-workspace/scripts"))
@@ -164,8 +181,8 @@ def tab_titles(force=False):
     return _TAB_TITLES_CACHE
 
 
-STATUS_OPTIONS = ["To Do", "In Progress", "Done", "Verified", "Overdue",
-                  "Need Revision", "Closed"]
+STATUS_OPTIONS = ["To Do", "In Progress", "Done", "Verifying", "Verified",
+                  "Overdue", "Need Revision", "Closed"]
 
 
 def set_status_validation(sheet_id):
@@ -361,11 +378,13 @@ def site_task_state(tab, rows=None):
             due = d.get("Due", "").strip()
             if due and due < tstr():
                 overdue.append(d)
-        elif status in DONE_STATUSES:
+        elif status in DONE_STATUSES or status == "verifying":
             # Status is the only signal: verification flips a row to Verified,
             # so anything still Done is unverified regardless of what's in
             # Result (a chase stamp, or a team note saying what they did —
             # notes are preserved when the result lands). Ben's rule, 16/07.
+            # "Verifying" rides here too: it is a Done change still inside its
+            # digestion window (or waiting on the feed), re-measured each tick.
             done_unver.append(d)
         elif status in (DONE_STATUSES | {"verified"}):
             dr = d.get("Date Raised", "").strip()
@@ -374,11 +393,17 @@ def site_task_state(tab, rows=None):
     return open_tasks, overdue, done_unver, completed_recent
 
 
-def verify_result(task, kintel):
-    """Match a tracked keyword in the task text and compute real before/after."""
+def verify_result(task, kintel, anchor=None):
+    """Match a tracked keyword in the task text and compute real before/after.
+
+    `anchor` is the date the change went live (the measurement start). We take
+    the "before" position from the first reading on/after it, so a change is
+    judged on what happened AFTER it shipped — not on a slide that was already
+    under way when the task was first raised. Falls back to Date Raised until a
+    change has an anchor (its first Verifying tick stamps one)."""
     text = " ".join([task.get("Finding (evidence)", ""),
                      task.get("Recommended action", "") + " " + task.get("Target page", "")]).lower()
-    raised = task.get("Date Raised", "").strip()
+    anchor_date = anchor or task.get("Date Raised", "").strip()
     best = None
     for k in kintel:
         if k["kw"] and k["kw"].lower() in text:
@@ -393,7 +418,7 @@ def verify_result(task, kintel):
         return {"skip": True, "kw": best["kw"]}
     pos_then = None
     for d, p in best["series"]:
-        if raised and d >= raised:
+        if anchor_date and d >= anchor_date:
             pos_then = p
             break
     if pos_then is None:
@@ -530,43 +555,112 @@ def write_registry(sites):
                                    range=f"'{REGISTRY_TAB}'!A{len(sites) + 2}:S1000"))
 
 
+def _team_note(result):
+    """The team-authored portion of a Result cell, stripped of any Boss note, so
+    a re-measured row keeps the human's note without it accumulating each tick."""
+    r = (result or "").strip()
+    if not r:
+        return ""
+    for pref in ("Overdue since",) + VERIFIED_PREFIXES:
+        idx = r.find(f" — {pref}")
+        if idx != -1:
+            return r[:idx].strip()
+    if r.startswith(("Overdue since",) + VERIFIED_PREFIXES):
+        return ""
+    return r
+
+
+def _measuring_since(result):
+    """The date a change first went live for measurement, parsed from an earlier
+    Boss note ('… since YYYY-MM-DD'). None until the first Verifying tick. The
+    lookbehind skips a leftover 'Overdue since …' chase stamp, which must NOT be
+    mistaken for the measurement clock — that would pre-start the window and let
+    the verifier judge a change before Google has had time to reflect it."""
+    m = re.search(r"(?<!Overdue )since (\d{4}-\d{2}-\d{2})", result or "")
+    return m.group(1) if m else None
+
+
+def _verdict(t, ki, since):
+    """(status, boss_note) for one Done/Verifying task. The heart of Ben's rule:
+    Need Revision means the developer's work was wrong or incomplete — never just
+    'not confirmed yet'. Anything unconfirmed is Verifying."""
+    stamp = since or tstr()
+    vr = verify_result(t, ki, anchor=since)
+    if vr and vr.get("skip"):
+        return ("Verifying",
+                f"Feed down: the rank feed is unavailable for '{vr['kw']}', so this "
+                f"change cannot be measured yet. It stays Verifying until the feed "
+                f"is back — reload DataForSEO (measuring since {stamp}).")
+    if not vr:
+        return ("Verified",
+                "Verified at face value — no single tracked keyword maps to this "
+                "change, so there is nothing to measure directly.")
+    kw, then, now, delta = vr["kw"], fmt_pos(vr["then"]), fmt_pos(vr["now"]), vr["delta"]
+    if delta > 0:
+        return ("Verified", f"Worked: '{kw}' moved {then} to {now}.")
+    # Not improved yet. Hold at Verifying until the change has had time to land.
+    if since is None:
+        return ("Verifying",
+                f"Measuring: the change is live and '{kw}' is at {now}. Google can "
+                f"take up to {DIGEST_DAYS} days to reflect on-page changes — "
+                f"measuring since {stamp}.")
+    try:
+        elapsed = (today() - datetime.date.fromisoformat(since)).days
+    except Exception:
+        elapsed = 0
+    if elapsed < DIGEST_DAYS:
+        return ("Verifying",
+                f"Measuring: '{kw}' at {now}, {elapsed} of {DIGEST_DAYS} days into "
+                f"the window — done and live, too early to judge (since {since}).")
+    if delta <= -NOISE_POSITIONS:
+        return ("Need Revision",
+                f"Needs rework: {elapsed} days on, '{kw}' has gone backwards "
+                f"({then} to {now}). The change looks incorrect or incomplete — "
+                f"revisit it and set the row back to Done to re-measure (since {since}).")
+    return ("Verified",
+            f"Held: '{kw}' at {now} after {elapsed} days (was {then} at the start) — "
+            f"no material regression, the change did not go backwards.")
+
+
+def _needs_measure(t, since):
+    """Does this row need a live position lookup THIS tick? Freshly-Done rows and
+    rows whose digestion window is up do; a change still inside its window is left
+    untouched — no API call — which keeps the verify loop off the rank feed for
+    the 14 days a change is settling (and keeps DataForSEO spend down)."""
+    st = (t.get("Status", "") or "").strip().lower()
+    if st in DONE_STATUSES or since is None:
+        return True
+    try:
+        return (today() - datetime.date.fromisoformat(since)).days >= DIGEST_DAYS
+    except Exception:
+        return True
+
+
 def do_verifications(sites):
-    """Deterministic VERIFY: write the real before/after for every team-Done
-    task. The agent used to rephrase these numbers; a template does it free."""
+    """Deterministic VERIFY. A team-Done change is measured against Position
+    History and moved to one of three states (see the status vocabulary above):
+    Verified (it worked, or held past the window), Verifying (correct but not yet
+    confirmable), or Need Revision (measurably backwards after the window). A row
+    already Verifying and still inside its window is skipped — no lookup, no spend
+    — until the window is up."""
     done = []
     for s in sites:
         if not s["done_unver"]:
             continue
+        pending = [(t, _measuring_since(t.get("Result", ""))) for t in s["done_unver"]]
+        pending = [(t, since) for t, since in pending if _needs_measure(t, since)]
+        if not pending:
+            continue                       # nothing due — no live lookup for this site
         ki = keyword_intel(s)
-        for t in s["done_unver"]:
-            vr = verify_result(t, ki)
-            if vr and vr.get("skip"):
-                print(f"HOUSEKEEPING — '{s['title']}' row {t['_row']}: verification "
-                      f"deferred, rank feed errored for '{vr['kw']}'")
-                continue
-            new_status = "Verified"
-            if vr:
-                if vr["delta"] > 0:
-                    result = (f"Worked: '{vr['kw']}' moved {fmt_pos(vr['then'])} "
-                              f"to {fmt_pos(vr['now'])} over 35 days")
-                elif vr["delta"] < 0:
-                    new_status = "Need Revision"
-                    result = (f"Gone backwards: '{vr['kw']}' was {fmt_pos(vr['then'])}, "
-                              f"now {fmt_pos(vr['now'])}. Owner to revisit the change "
-                              "and set the row back to Done to re-measure")
-                else:
-                    result = (f"No movement yet: '{vr['kw']}' still at "
-                              f"{fmt_pos(vr['now'])}, keep pushing")
-            else:
-                result = ("Verified at face value, no single tracked keyword to "
-                          "measure. Check again at next audit")
-            note = t.get("Result", "").strip()
-            if note and not note.startswith(("Overdue since",) + VERIFIED_PREFIXES):
-                result = f"{note} — {result}"
+        for t, since in pending:
+            new_status, boss = _verdict(t, ki, since)
+            team = _team_note(t.get("Result", ""))
+            result = f"{team} — {boss}" if team else boss
             update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
                          [[new_status, result]])
             done.append({"site": s["title"], "row": t["_row"], "result": result,
-                         "line": f"'{s['title']}' row {t['_row']}: {result}"})
+                         "status": new_status,
+                         "line": f"'{s['title']}' row {t['_row']}: {new_status} — {boss}"})
     return done
 
 
@@ -705,10 +799,100 @@ def hybrid_audit():
     return 0
 
 
+def _dfs_band(bal):
+    import seo_intel
+    if bal is None:
+        return None
+    if bal <= seo_intel.DFS_MIN_BALANCE:
+        return "out"
+    if bal <= seo_intel.DFS_WARN_BALANCE:
+        return "low"
+    return "ok"
+
+
+def _dfs_alert(bal):
+    """Push Ben one message whenever the balance crosses a band — so a run-down is
+    caught early and a reload is CONFIRMED back to us automatically, without anyone
+    having to watch the sheet or tell us by hand. Fires once per crossing, never
+    every tick, and never fails the tick if the send or state file misbehaves."""
+    band = _dfs_band(bal)
+    if band is None:
+        return
+    try:
+        prev = json.loads(DFS_ALERT_STATE.read_text()).get("band")
+    except Exception:
+        prev = None
+    if band == prev:
+        return
+    msg = {
+        "out": f"🛑 DataForSEO OUT OF CREDIT (${bal:.2f}). Live rank checks are PAUSED "
+               "— reload at https://app.dataforseo.com to resume.",
+        "low": f"⚠️ DataForSEO balance is low (${bal:.2f}). Reload soon at "
+               "https://app.dataforseo.com before rank checks stop.",
+        "ok":  (f"✅ DataForSEO reloaded (${bal:.2f}). Rank checks are running normally "
+                "again." if prev in ("low", "out") else None),
+    }.get(band)
+    # First-ever run with no prior state: only speak up if we start in trouble.
+    if prev is None and band == "ok":
+        msg = None
+    if msg:
+        try:
+            subprocess.run([str(HERMES_BIN), "send", "-t", DFS_ALERT_TARGET, "-q", msg],
+                           timeout=25, check=False)
+        except Exception as e:
+            print(f"# dfs balance alert send failed ({e})", file=sys.stderr)
+    try:
+        DFS_ALERT_STATE.parent.mkdir(parents=True, exist_ok=True)
+        DFS_ALERT_STATE.write_text(json.dumps({"band": band, "bal": bal, "at": tstr()}))
+    except Exception:
+        pass
+
+
+def feed_banner():
+    """Loud, self-clearing flag when the rank feed is out of credit. Mirrors the
+    state to a single Ops Health row (visible off the tick log) and pushes Ben a
+    one-time alert on any balance-band change — the automatic reload monitor."""
+    import seo_intel
+    bal = seo_intel.dfs_balance()
+    down = bal is not None and bal <= seo_intel.DFS_MIN_BALANCE
+    if down:
+        line = (f"⚠️  DATAFORSEO OUT OF CREDIT (balance ${bal:.2f}) — position checks "
+                "are PAUSED to avoid false drops. RELOAD at https://app.dataforseo.com. "
+                "Done tasks are held as 'Verifying', no ranking data is being recorded.")
+        print(line + "\n")
+    _dfs_alert(bal)
+    try:
+        status = (f"⚠️ OUT OF CREDIT (${bal:.2f}) — reload" if down
+                  else (f"OK (${bal:.2f})" if bal is not None else "balance unreadable"))
+        _upsert_ops_row("DataForSEO feed", "Rank feed credit", status)
+    except Exception as e:
+        print(f"# ops-health flag skipped ({e})", file=sys.stderr)
+    return down
+
+
+def _upsert_ops_row(job, name, status):
+    """Find-or-append one Ops Health row keyed on Job, so the feed flag updates in
+    place and self-clears rather than piling up a line per tick."""
+    OPS = "Ops Health"
+    ensure_tab(OPS, ["Checked", "Job", "Name", "Schedule", "Last Run", "Last Status"])
+    rows = read_tab(OPS)
+    target = None
+    for i, r in enumerate(rows[1:], start=2):
+        if len(r) > 1 and (r[1] or "").strip() == job:
+            target = i
+            break
+    row = [tstr(), job, name, "every tick", tstr(), status]
+    if target:
+        update_range(f"'{OPS}'!A{target}:F{target}", [row])
+    else:
+        append_rows(OPS, [row])
+
+
 def main():
     sites = build_sites()
     write_registry(sites)
     print(f"# SEO Boss situation report — {tstr()}")
+    feed_banner()
     print(f"Monitored sites: {len(sites)} (from the Monitored Sites registry).\n")
     print("| Site | Domain | Top10 | AvgPos | 7d Move | Last Audited | Open |")
     print("|---|---|---|---|---|---|---|")

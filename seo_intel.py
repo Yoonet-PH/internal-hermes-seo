@@ -76,6 +76,36 @@ def _dfs_auth():
     return "Basic " + base64.b64encode(f"{login}:{pw}".encode()).decode()
 
 
+DFS_USER_DATA = "https://api.dataforseo.com/v3/appendix/user_data"
+# At or below this USD balance the account can no longer run live SERP lookups
+# (every call 402s), so we treat the feed as down rather than hammer a dead
+# endpoint and log a Position History row of 999s for every keyword.
+DFS_MIN_BALANCE = 0.50
+# Warn while there is still headroom to reload before checks stop. At the ~$50/day
+# burn seen in Jul 2026 this is roughly half a day of lead time.
+DFS_WARN_BALANCE = 20.0
+
+
+def dfs_balance():
+    """Current DataForSEO account balance in USD, or None if it can't be read."""
+    try:
+        req = urllib.request.Request(DFS_USER_DATA,
+                                     headers={"Authorization": _dfs_auth()})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            d = json.loads(r.read().decode())
+        return float(d["tasks"][0]["result"][0]["money"]["balance"])
+    except Exception:
+        return None
+
+
+def feed_out_of_credit(min_balance=DFS_MIN_BALANCE):
+    """True ONLY when we can confirm the balance is at/below the floor. An
+    unreadable balance (creds missing, network blip) returns False — a flaky
+    check must never freeze the Boss into thinking a funded feed is down."""
+    bal = dfs_balance()
+    return bal is not None and bal <= min_balance
+
+
 # --------------------------------------------------------------------------- #
 # DataForSEO backend — live organic position for one keyword
 # --------------------------------------------------------------------------- #
@@ -242,6 +272,13 @@ def keyword_intel_v2(domain, keywords=None, location=None, language=DEFAULT_LANG
     # from sum(calls) to ~max(call). GSC keywords resolve inline (no network).
     from concurrent.futures import ThreadPoolExecutor
 
+    # One balance check per site per tick. When the account is out of credit the
+    # DataForSEO path below is skipped entirely: no HTTP call (so we stop hammering
+    # a dead endpoint) and, further down, no history row (so an outage no longer
+    # buries Position History under thousands of 999 placeholders). GSC-backed
+    # keywords are unaffected — they return above before this ever matters.
+    feed_down = feed_out_of_credit()
+
     def resolve(kw):
         """-> (kw, pos_now, landing, source, cost). Never raises."""
         cfg = rowcfg.get(kw.lower(), {
@@ -251,6 +288,10 @@ def keyword_intel_v2(domain, keywords=None, location=None, language=DEFAULT_LANG
         if kw.lower() in gmap:
             raw, landing = gmap[kw.lower()]
             return kw, int(round(raw)), landing, "gsc", 0.0
+        if feed_down:
+            # Out of credit: don't call (it would 402) and don't record — the
+            # caller reads this source and holds the change as 'Verifying'.
+            return kw, NOT_FOUND, "", "error:dataforseo out of credit", 0.0
         try:
             pos_now, landing, cost = dfs_rank(
                 domain, kw, cfg["location"], cfg["language"], cfg["device"])
@@ -286,7 +327,13 @@ def keyword_intel_v2(domain, keywords=None, location=None, language=DEFAULT_LANG
         hist_rows.append([s.tstr(), s._bare_domain(domain), kw, pos_now, landing, source])
 
     if record:
-        record_positions(hist_rows)
+        # Never persist out-of-credit placeholders — they are not measurements,
+        # and recording one per keyword every tick is exactly what bloated the
+        # tab during the outage. Genuine one-off lookup errors still record.
+        keep = [r for r in hist_rows
+                if not str(r[5]).startswith("error:dataforseo out of credit")]
+        if keep:
+            record_positions(keep)
     out.sort(key=lambda k: (k["pos_now"] if k["pos_now"] else NOT_FOUND))
     if verbose:
         print(f"  (DataForSEO spend this run: ${round(total_cost, 4)})")

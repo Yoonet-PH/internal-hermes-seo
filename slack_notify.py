@@ -340,7 +340,11 @@ def deliver(sites, verified, chased):
         if od and post(channel, overdue_msg(title, od)):
             log.append(f"  - {title}: posted {len(od)} overdue chase(s) to {channel}")
 
-        vr = ver_by_site.get(title) or []
+        # Only announce verification OUTCOMES. A change sitting at "Verifying"
+        # is re-measured every tick; posting each of those would ping the channel
+        # every 30 minutes. We speak up when it lands: Verified or Need Revision.
+        vr = [v for v in (ver_by_site.get(title) or [])
+              if v.get("status") in ("Verified", "Need Revision")]
         if vr and post(channel, verified_msg(title, vr)):
             log.append(f"  - {title}: posted {len(vr)} verification(s) to {channel}")
 
