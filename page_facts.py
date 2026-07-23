@@ -138,6 +138,67 @@ def link_check(url, body_urls):
     return out
 
 
+def _canonical_of(body):
+    m = re.search(r'<link[^>]+rel\s*=\s*["\']canonical["\'][^>]*>', body, re.I) or \
+        re.search(r'<link[^>]+rel=canonical[^>]*>', body, re.I)
+    return _attr(m.group(0), "href") if m else None
+
+
+def classify_canonical(canonical):
+    """Structural verdict for one page's canonical. 'doubled' catches the Joomla/
+    YOOtheme base+absolute concatenation bug (https://site/https://site/page)."""
+    if not canonical:
+        return "missing"
+    if canonical.count("://") > 1:
+        return "doubled"
+    return "ok"
+
+
+def _internal_links(base_url, body, limit):
+    from urllib.parse import urljoin, urlparse
+    host = urlparse(base_url).netloc
+    seen = []
+    for m in re.finditer(r'href\s*=\s*["\']([^"\'#?]+)', body):
+        u = urljoin(base_url, m.group(1))
+        p = urlparse(u)
+        if p.netloc != host or p.scheme not in ("http", "https"):
+            continue
+        if re.search(r"\.(jpg|jpeg|png|gif|svg|webp|css|js|pdf|ico|zip|xml)$", p.path, re.I):
+            continue
+        if u.rstrip("/") == base_url.rstrip("/"):
+            continue
+        if u not in seen:
+            seen.append(u)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def canonical_health(domain, max_internal=4):
+    """Check the canonical across the homepage AND a sample of internal pages, so a
+    homepage-only patch cannot read as a site-wide fix. Reads rendered HTML, so it
+    is platform-agnostic (Joomla, YOOtheme, Webflow, etc.). Returns:
+      {checked:[(url,canonical,verdict)], broken:[...], all_clean:bool, error?:str}
+    """
+    base = domain if domain.startswith("http") else "https://" + domain.lstrip("/")
+    home = base.rstrip("/") + "/"
+    st, final, body = _get(home)
+    if st != 200 or body.startswith("__ERROR__"):
+        return {"checked": [], "broken": [], "all_clean": False,
+                "error": f"homepage fetch failed (HTTP {st})"}
+    home_can = _canonical_of(body)
+    checked = [(final, home_can, classify_canonical(home_can))]
+    for u in _internal_links(final, body, max_internal):
+        s2, _f2, b2 = _get(u)
+        if s2 != 200 or b2.startswith("__ERROR__"):
+            continue                       # skip unfetchable pages, don't guess
+        can = _canonical_of(b2)
+        checked.append((u, can, classify_canonical(can)))
+    broken = [row for row in checked if row[2] in ("doubled", "missing")]
+    return {"checked": checked, "broken": broken,
+            "all_clean": (not broken and len(checked) > 0)}
+
+
 def brief(pages):
     """The VERIFIED PAGE FACTS block that goes into the audit situation report."""
     lines = ["", "=" * 72,

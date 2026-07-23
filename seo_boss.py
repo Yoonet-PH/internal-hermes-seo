@@ -649,13 +649,51 @@ def _needs_measure(t, since):
         return True
 
 
+def verify_onpage(task, domain):
+    """Directly re-verify a structurally-checkable on-page fix against the LIVE
+    pages (homepage + an internal sample), so a technical 'Done' is confirmed on
+    the page rather than rubber-stamped 'Verified at face value'. This is what
+    stops a homepage-only patch passing as a site-wide fix. Canonical for now
+    (extensible by fix type); returns None when the task is not one we can check
+    this way, so it falls back to the normal keyword flow."""
+    blob = ((task.get("Finding (evidence)") or "") + " "
+            + (task.get("Recommended action") or "")).lower()
+    # Scope to the doubled/malformed/missing-canonical family — the bug this check
+    # actually measures. A different canonical task (e.g. a canonical→redirect
+    # mismatch) is left to the normal flow so we never over-verify it.
+    if "canonical" not in blob or not any(
+            w in blob for w in ("doubl", "malform", "duplicat", "concatenat",
+                                "garbled", "no canonical", "missing")):
+        return None
+    try:
+        import page_facts
+        h = page_facts.canonical_health(domain)
+    except Exception:
+        return None
+    checked = h.get("checked") or []
+    if not checked:
+        return None                        # could not fetch — leave to normal flow
+    n = len(checked)
+    if h.get("all_clean"):
+        return ("Verified",
+                f"Canonical verified live on {n} pages (homepage + {n - 1} internal) — every one a "
+                "single clean URL. Fix confirmed site-wide, not just the homepage.")
+    broken = h["broken"]
+    detail = "; ".join(f"{u.split('//', 1)[-1]} = {v}" for u, _c, v in broken[:4])
+    return ("Need Revision",
+            f"Canonical still malformed on {len(broken)} of {n} pages checked ({detail}). A homepage-only "
+            "patch leaves internal pages broken — reapply at the template/global level so every page gets "
+            "one clean canonical (Reben Mobility is the working reference on the same Joomla/YOOtheme stack).")
+
+
 def do_verifications(sites):
     """Deterministic VERIFY. A team-Done change is measured against Position
     History and moved to one of three states (see the status vocabulary above):
     Verified (it worked, or held past the window), Verifying (correct but not yet
     confirmable), or Need Revision (measurably backwards after the window). A row
     already Verifying and still inside its window is skipped — no lookup, no spend
-    — until the window is up."""
+    — until the window is up. Structurally-checkable on-page fixes (canonical) are
+    verified against the live pages instead, so a 'Done' is never rubber-stamped."""
     done = []
     for s in sites:
         if not s["done_unver"]:
@@ -664,9 +702,15 @@ def do_verifications(sites):
         pending = [(t, since) for t, since in pending if _needs_measure(t, since)]
         if not pending:
             continue                       # nothing due — no live lookup for this site
-        ki = keyword_intel(s)
+        ki = None                          # fetched lazily, only if a keyword task needs it
         for t, since in pending:
-            new_status, boss = _verdict(t, ki, since)
+            op = verify_onpage(t, s["domain"])
+            if op is not None:
+                new_status, boss = op
+            else:
+                if ki is None:
+                    ki = keyword_intel(s)
+                new_status, boss = _verdict(t, ki, since)
             team = _team_note(t.get("Result", ""))
             result = f"{team} — {boss}" if team else boss
             update_range(f"'{s['title']}'!I{t['_row']}:J{t['_row']}",
@@ -1012,8 +1056,10 @@ def main():
                         f"{covered}. If it does not, raise nothing." if covered else "")
                 print(f"  - [{sev.upper()}] {name} — {val} page(s)  ({secname}){flag}")
             print("Each blocker is a candidate task: where REPO / ACCESS names a repo, write a "
-                  "ready-to-run Claude Code prompt to fix it there; where it says 'No repo / SEO "
-                  "only', write 'Not a code change — ' + a client recommendation. Errors before warnings.")
+                  "ready-to-run Claude Code prompt to fix it there; where it says 'No repo' the site is "
+                  "Yoonet-managed directly in its CMS admin (Joomla/YOOtheme/Webflow/etc.) — write "
+                  "'Not a code change — ' + the exact steps for a Yoonet person to action in that CMS "
+                  "(never a client recommendation). Errors before warnings.")
         elif tech is not None:
             print(f"\nTECHNICAL: site audit score {tech.get('score', '')}/100 — no blocking errors or warnings.")
         pages, seen = [], set()
